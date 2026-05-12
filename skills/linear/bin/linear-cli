@@ -1,0 +1,1140 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#   "click>=8.1",
+#   "httpx>=0.27",
+#   "python-dateutil>=2.9",
+# ]
+# ///
+"""linear-cli: Python uv-script reimplementation of evangodon/linear-cli.
+
+Talks to Linear's GraphQL API directly. Auth via $LINEAR_API_KEY.
+
+Designed for parity with the Rust CLI's surface so the existing
+`linear-cli` skill can call it unchanged. Most subcommands match
+1:1; output formats (table/json/ndjson) and shared flags
+(--output, --filter, --fields, --format, --limit, --all,
+--quiet, --id-only, --no-pager, --dry-run, --data) are honored.
+"""
+from __future__ import annotations
+
+import json
+import os
+import re
+import sys
+import webbrowser
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any
+
+import click
+import httpx
+from dateutil import parser as dateparse
+
+API = "https://api.linear.app/graphql"
+CACHE_DIR = Path.home() / ".cache" / "linear-cli"
+CACHE_FILE = CACHE_DIR / "cache.json"
+CACHE_TTL_S = 24 * 3600
+
+PRIORITY_NAMES = {0: "none", 1: "urgent", 2: "high", 3: "normal", 4: "low"}
+
+
+# ---------------------------------------------------------------- HTTP / GQL
+
+def _key() -> str:
+    k = os.environ.get("LINEAR_API_KEY")
+    if not k:
+        click.echo("error: LINEAR_API_KEY is not set", err=True)
+        sys.exit(2)
+    return k
+
+
+def gql(query: str, variables: dict | None = None) -> dict:
+    r = httpx.post(
+        API,
+        headers={"Authorization": _key(), "Content-Type": "application/json"},
+        json={"query": query, "variables": variables or {}},
+        timeout=30,
+    )
+    if r.status_code != 200:
+        click.echo(f"error: HTTP {r.status_code}: {r.text[:200]}", err=True)
+        sys.exit(1)
+    body = r.json()
+    if "errors" in body:
+        for e in body["errors"]:
+            click.echo(f"error: {e.get('message')}", err=True)
+        sys.exit(1)
+    return body["data"]
+
+
+# ---------------------------------------------------------------- cache
+
+def _load_cache() -> dict:
+    if not CACHE_FILE.exists():
+        return {}
+    try:
+        d = json.loads(CACHE_FILE.read_text())
+        if d.get("ts", 0) + CACHE_TTL_S < datetime.now(timezone.utc).timestamp():
+            return {}
+        return d
+    except Exception:
+        return {}
+
+
+def _save_cache(d: dict) -> None:
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    d["ts"] = datetime.now(timezone.utc).timestamp()
+    CACHE_FILE.write_text(json.dumps(d))
+
+
+def _cache_get(key: str):
+    return _load_cache().get(key)
+
+
+def _cache_put(key: str, value) -> None:
+    c = _load_cache() or {}
+    c[key] = value
+    _save_cache(c)
+
+
+def _viewer() -> dict:
+    v = _cache_get("viewer")
+    if v:
+        return v
+    v = gql("{ viewer { id name email } }")["viewer"]
+    _cache_put("viewer", v)
+    return v
+
+
+def _teams_meta() -> list[dict]:
+    t = _cache_get("teams_meta")
+    if t:
+        return t
+    nodes = []
+    after = None
+    while True:
+        d = gql(
+            "query($after: String) { teams(first: 50, after: $after) { pageInfo { hasNextPage endCursor } nodes { id key name } } }",
+            {"after": after},
+        )
+        nodes.extend(d["teams"]["nodes"])
+        if not d["teams"]["pageInfo"]["hasNextPage"]:
+            break
+        after = d["teams"]["pageInfo"]["endCursor"]
+    _cache_put("teams_meta", nodes)
+    return nodes
+
+
+def _team(name_or_key: str) -> dict:
+    n = name_or_key.lower()
+    for t in _teams_meta():
+        if t["name"].lower() == n or t["key"].lower() == n:
+            return _team_full(t["id"])
+    click.echo(f"error: team not found: {name_or_key}", err=True)
+    sys.exit(1)
+
+
+def _team_full(team_id: str) -> dict:
+    cache_key = f"team_full:{team_id}"
+    c = _cache_get(cache_key)
+    if c:
+        return c
+    d = gql(
+        """
+        query($id: String!) {
+          team(id: $id) {
+            id key name
+            states(first: 50) { nodes { id name type } }
+            labels(first: 100) { nodes { id name } }
+          }
+        }
+        """,
+        {"id": team_id},
+    )
+    t = d["team"]
+    _cache_put(cache_key, t)
+    return t
+
+
+def _users() -> list[dict]:
+    u = _cache_get("users")
+    if u:
+        return u
+    nodes = []
+    after = None
+    while True:
+        d = gql(
+            "query($after: String) { users(first: 50, after: $after) { pageInfo { hasNextPage endCursor } nodes { id name email active } } }",
+            {"after": after},
+        )
+        nodes.extend([x for x in d["users"]["nodes"] if x.get("active", True)])
+        if not d["users"]["pageInfo"]["hasNextPage"]:
+            break
+        after = d["users"]["pageInfo"]["endCursor"]
+    _cache_put("users", nodes)
+    return nodes
+
+
+def _projects() -> list[dict]:
+    p = _cache_get("projects")
+    if p:
+        return p
+    nodes = []
+    after = None
+    while True:
+        d = gql(
+            "query($after: String) { projects(first: 50, after: $after) { pageInfo { hasNextPage endCursor } nodes { id name } } }",
+            {"after": after},
+        )
+        nodes.extend(d["projects"]["nodes"])
+        if not d["projects"]["pageInfo"]["hasNextPage"]:
+            break
+        after = d["projects"]["pageInfo"]["endCursor"]
+    _cache_put("projects", nodes)
+    return nodes
+
+
+def _resolve_state(team: dict, name: str) -> str:
+    full = _team_full(team["id"])
+    for s in full["states"]["nodes"]:
+        if s["name"].lower() == name.lower():
+            return s["id"]
+    raise click.ClickException(f"state not found in team {team['name']}: {name}")
+
+
+def _resolve_user(name_or_me: str) -> str:
+    if name_or_me.lower() == "me":
+        return _viewer()["id"]
+    if re.fullmatch(r"[0-9a-f-]{36}", name_or_me.lower()):
+        return name_or_me
+    n = name_or_me.lower()
+    for u in _users():
+        if u["email"] and u["email"].lower() == n:
+            return u["id"]
+        if u["name"].lower() == n:
+            return u["id"]
+        if u["name"].lower().startswith(n) or n in u["name"].lower():
+            return u["id"]
+    raise click.ClickException(f"user not found: {name_or_me}")
+
+
+def _resolve_labels(team: dict, names: list[str]) -> list[str]:
+    if not names:
+        return []
+    full = _team_full(team["id"])
+    have = {l["name"].lower(): l["id"] for l in full["labels"]["nodes"]}
+    out, missing = [], []
+    for n in names:
+        if n.lower() in have:
+            out.append(have[n.lower()])
+        else:
+            missing.append(n)
+    if missing:
+        raise click.ClickException(f"label(s) missing in team {team['name']}: {', '.join(missing)}")
+    return out
+
+
+def _resolve_project(name_or_id: str) -> str:
+    if re.fullmatch(r"[0-9a-f-]{36}", name_or_id.lower()):
+        return name_or_id
+    for p in _projects():
+        if p["name"].lower() == name_or_id.lower():
+            return p["id"]
+    raise click.ClickException(f"project not found: {name_or_id}")
+
+
+def _resolve_due(s: str | None) -> str | None:
+    if s is None:
+        return None
+    if s.lower() == "none":
+        return ""  # clear
+    if s.lower() == "today":
+        return datetime.now(timezone.utc).date().isoformat()
+    if s.lower() == "tomorrow":
+        return (datetime.now(timezone.utc) + timedelta(days=1)).date().isoformat()
+    m = re.fullmatch(r"\+(\d+)([dwm])", s.lower())
+    if m:
+        n = int(m.group(1))
+        u = m.group(2)
+        delta = timedelta(days=n) if u == "d" else timedelta(weeks=n) if u == "w" else timedelta(days=30 * n)
+        return (datetime.now(timezone.utc) + delta).date().isoformat()
+    return dateparse.parse(s).date().isoformat()
+
+
+def _resolve_since(s: str) -> str:
+    return _resolve_due(s) or s
+
+
+# ---------------------------------------------------------------- helpers
+
+ISSUE_FIELDS = """
+  id identifier title url priority estimate dueDate
+  state { id name type }
+  assignee { id name email }
+  team { id key name }
+  project { id name }
+  labels(first: 20) { nodes { id name } }
+  createdAt updatedAt
+"""
+
+
+def _filter(items: list[dict], expressions: list[str]) -> list[dict]:
+    """Apply --filter k=v, k!=v, k~=v (case-insensitive contains).
+    Supports nested keys like 'state.name'."""
+    def get(obj, path):
+        cur = obj
+        for k in path.split("."):
+            if cur is None: return None
+            cur = cur.get(k) if isinstance(cur, dict) else None
+        return cur
+    out = items
+    for e in expressions:
+        m = re.match(r"^([\w\.]+)(!=|~=|=)(.*)$", e)
+        if not m:
+            raise click.ClickException(f"invalid --filter: {e}")
+        path, op, val = m.group(1), m.group(2), m.group(3)
+        def keep(it, p=path, o=op, v=val):
+            actual = get(it, p)
+            if actual is None: return False
+            a = str(actual).lower()
+            v2 = v.lower()
+            if o == "=":  return a == v2
+            if o == "!=": return a != v2
+            if o == "~=": return v2 in a
+            return False
+        out = [i for i in out if keep(i)]
+    return out
+
+
+def _pick_fields(items: list[dict], fields_csv: str) -> list[dict]:
+    def get(obj, path):
+        cur = obj
+        for k in path.split("."):
+            if cur is None: return None
+            cur = cur.get(k) if isinstance(cur, dict) else None
+        return cur
+    keys = [k.strip() for k in fields_csv.split(",") if k.strip()]
+    return [{k: get(i, k) for k in keys} for i in items]
+
+
+def _format_template(items: list[dict], template: str) -> str:
+    def get(obj, path):
+        cur = obj
+        for k in path.split("."):
+            if cur is None: return ""
+            cur = cur.get(k) if isinstance(cur, dict) else ""
+        return cur if cur is not None else ""
+    out_lines = []
+    for it in items:
+        line = template
+        for ph in re.findall(r"\{\{([\w\.]+)\}\}", template):
+            line = line.replace(f"{{{{{ph}}}}}", str(get(it, ph)))
+        out_lines.append(line)
+    return "\n".join(out_lines)
+
+
+def _emit(items: list[dict] | dict, fmt: str, fields: str | None, template: str | None,
+          quiet: bool, id_only: bool) -> None:
+    if isinstance(items, dict):
+        items = [items]
+    if id_only:
+        for it in items:
+            click.echo(it.get("identifier") or it.get("id", ""))
+        return
+    if quiet:
+        return
+    if template:
+        click.echo(_format_template(items, template))
+        return
+    if fields:
+        items = _pick_fields(items, fields)
+    if fmt == "json":
+        click.echo(json.dumps(items, indent=2, default=str))
+    elif fmt == "ndjson":
+        for it in items:
+            click.echo(json.dumps(it, default=str))
+    else:
+        _table(items)
+
+
+def _table(items: list[dict]) -> None:
+    if not items:
+        click.echo("(no results)")
+        return
+    cols = ["identifier", "title", "state", "assignee", "priority"]
+
+    def cell(it: dict, c: str) -> str:
+        if c == "state": return (it.get("state") or {}).get("name", "")
+        if c == "assignee": return (it.get("assignee") or {}).get("name", "") if it.get("assignee") else ""
+        if c == "priority":
+            p = it.get("priority")
+            return PRIORITY_NAMES.get(p, str(p) if p is not None else "")
+        v = it.get(c, "")
+        return "" if v is None else str(v)
+
+    if items and "identifier" not in items[0]:
+        # Generic projection: dump JSON-ish
+        click.echo(json.dumps(items, indent=2, default=str))
+        return
+    rows = [[cell(it, c) for c in cols] for it in items]
+    widths = [max(len(c), max((len(r[i]) for r in rows), default=0)) for i, c in enumerate(cols)]
+    sep = "  "
+    click.echo(sep.join(c.ljust(widths[i]) for i, c in enumerate(cols)))
+    click.echo(sep.join("-" * widths[i] for i in range(len(cols))))
+    for r in rows:
+        click.echo(sep.join(r[i].ljust(widths[i]) for i in range(len(cols))))
+
+
+def _merge_data(payload: dict, data_json: str | None) -> dict:
+    if data_json:
+        try:
+            extra = json.loads(data_json)
+        except json.JSONDecodeError as e:
+            raise click.ClickException(f"invalid --data JSON: {e}")
+        payload.update(extra)
+    return payload
+
+
+# ---------------------------------------------------------------- CLI root
+
+<prefix>RED_OUTPUT_OPTS = [
+    click.option("--output", "-o", "out_fmt", type=click.Choice(["table", "json", "ndjson"]), default="table"),
+    click.option("--filter", "filters", multiple=True),
+    click.option("--fields"),
+    click.option("--format", "tmpl"),
+    click.option("--limit", type=int, default=50),
+    click.option("--all", "all_pages", is_flag=True),
+    click.option("--quiet", is_flag=True),
+    click.option("--id-only", "id_only", is_flag=True),
+    click.option("--no-pager", is_flag=True),
+]
+
+
+def shared_output(f):
+    for opt in reversed(<prefix>RED_OUTPUT_OPTS):
+        f = opt(f)
+    return f
+
+
+@click.group(context_settings={"help_option_names": ["-h", "--help"]})
+def cli():
+    """linear-cli (Python uv-script reimplementation)."""
+
+
+# ---------------------------------------------------------------- issues
+
+@cli.group()
+def issues():
+    """Issue operations."""
+
+
+cli.add_command(issues, name="i")  # alias
+
+
+@issues.command("list")
+@click.option("--team", "-t")
+@click.option("--state", "-s")
+@click.option("--assignee", "-a")
+@click.option("--mine", is_flag=True)
+@click.option("--project")
+@click.option("--label", "-l", "labels", multiple=True)
+@click.option("--since")
+@click.option("--group-by", type=click.Choice(["state", "priority", "assignee"]))
+@click.option("--count-only", is_flag=True)
+@shared_output
+def issues_list(team, state, assignee, mine, project, labels, since, group_by, count_only,
+                out_fmt, filters, fields, tmpl, limit, all_pages, quiet, id_only, no_pager):
+    team = team or os.environ.get("LINEAR_DEFAULT_TEAM")
+    project = project or os.environ.get("LINEAR_DEFAULT_PROJECT")
+    f: dict[str, Any] = {}
+    if team: f["team"] = {"key": {"eq": _team(team)["key"]}}
+    if state: f["state"] = {"name": {"eq": state}}
+    if mine: assignee = "me"
+    if assignee:
+        if assignee.lower() == "me":
+            f["assignee"] = {"id": {"eq": _viewer()["id"]}}
+        else:
+            f["assignee"] = {"id": {"eq": _resolve_user(assignee)}}
+    if project: f["project"] = {"name": {"eq": project}}
+    if labels: f["labels"] = {"some": {"name": {"in": list(labels)}}}
+    if since: f["createdAt"] = {"gte": _resolve_since(since)}
+
+    nodes = _paginate_issues(f, limit, all_pages)
+    if count_only:
+        click.echo(str(len(nodes)))
+        return
+    if group_by:
+        groups: dict[str, list] = {}
+        for it in nodes:
+            key = (it.get(group_by) or {}).get("name") if group_by != "priority" else PRIORITY_NAMES.get(it.get("priority"), "?")
+            groups.setdefault(key or "(none)", []).append(it)
+        if out_fmt == "json":
+            click.echo(json.dumps({k: v for k, v in groups.items()}, indent=2, default=str))
+        else:
+            for k, v in groups.items():
+                click.echo(f"\n## {k} ({len(v)})")
+                _emit(v, "table", None, None, False, False)
+        return
+    if filters: nodes = _filter(list(filters), nodes) if False else _filter(nodes, list(filters))
+    _emit(nodes, out_fmt, fields, tmpl, quiet, id_only)
+
+
+def _paginate_issues(filt: dict, limit: int, all_pages: bool) -> list[dict]:
+    out: list[dict] = []
+    after = None
+    page_size = min(50, limit) if not all_pages else 50
+    while True:
+        d = gql(
+            f"""
+            query($filter: IssueFilter, $first: Int, $after: String) {{
+              issues(filter: $filter, first: $first, after: $after, orderBy: updatedAt) {{
+                pageInfo {{ endCursor hasNextPage }}
+                nodes {{ {ISSUE_FIELDS} }}
+              }}
+            }}
+            """,
+            {"filter": filt, "first": page_size, "after": after},
+        )
+        page = d["issues"]["nodes"]
+        out.extend([_flatten_issue(i) for i in page])
+        if not all_pages and len(out) >= limit:
+            return out[:limit]
+        if not d["issues"]["pageInfo"]["hasNextPage"]:
+            return out
+        after = d["issues"]["pageInfo"]["endCursor"]
+
+
+def _flatten_issue(i: dict) -> dict:
+    i["labels"] = [l["name"] for l in (i.get("labels", {}) or {}).get("nodes", [])]
+    return i
+
+
+@issues.command("get")
+@click.argument("ids", nargs=-1, required=True)
+@click.option("--comments", "incl_comments", is_flag=True)
+@click.option("--history", "incl_history", is_flag=True)
+@shared_output
+def issues_get(ids, incl_comments, incl_history,
+               out_fmt, filters, fields, tmpl, limit, all_pages, quiet, id_only, no_pager):
+    results = []
+    for ident in ids:
+        extra = ""
+        if incl_comments:
+            extra += " comments(first: 50) { nodes { id body createdAt user { name } } }"
+        if incl_history:
+            extra += " history(first: 50) { nodes { id createdAt actor { name } fromState { name } toState { name } fromAssignee { name } toAssignee { name } } }"
+        d = gql(
+            f"""
+            query($id: String!) {{
+              issue(id: $id) {{
+                {ISSUE_FIELDS}
+                description
+                {extra}
+              }}
+            }}
+            """,
+            {"id": ident},
+        )
+        node = d.get("issue")
+        if not node:
+            click.echo(f"warn: not found: {ident}", err=True)
+            continue
+        results.append(_flatten_issue(node))
+    if filters: results = _filter(results, list(filters))
+    _emit(results, out_fmt, fields, tmpl, quiet, id_only)
+
+
+@issues.command("create")
+@click.argument("title", required=True)
+@click.option("--team", "-t")
+@click.option("--description", "-d")
+@click.option("--priority", "-p", type=int)
+@click.option("--state", "-s")
+@click.option("--assignee", "-a")
+@click.option("--labels", "-l", multiple=True)
+@click.option("--due")
+@click.option("--estimate", "-e", type=int)
+@click.option("--project")
+@click.option("--data", "data_json")
+@click.option("--dry-run", is_flag=True)
+@shared_output
+def issues_create(title, team, description, priority, state, assignee, labels, due, estimate, project,
+                  data_json, dry_run, out_fmt, filters, fields, tmpl, limit, all_pages, quiet, id_only, no_pager):
+    team = team or os.environ.get("LINEAR_DEFAULT_TEAM")
+    if not team:
+        raise click.ClickException("--team required (or set LINEAR_DEFAULT_TEAM)")
+    project = project or os.environ.get("LINEAR_DEFAULT_PROJECT")
+    t = _team(team)
+    body: dict[str, Any] = {"title": title, "teamId": t["id"]}
+    if project: body["projectId"] = _resolve_project(project)
+    if description == "-":
+        description = sys.stdin.read()
+    if description is not None: body["description"] = description
+    if priority is not None: body["priority"] = priority
+    if state: body["stateId"] = _resolve_state(t, state)
+    if assignee: body["assigneeId"] = _resolve_user(assignee)
+    if labels: body["labelIds"] = _resolve_labels(t, list(labels))
+    if due: body["dueDate"] = _resolve_due(due)
+    if estimate is not None: body["estimate"] = estimate
+    body = _merge_data(body, data_json)
+    if dry_run:
+        click.echo(json.dumps(body, indent=2))
+        return
+    d = gql(
+        f"""
+        mutation($input: IssueCreateInput!) {{
+          issueCreate(input: $input) {{
+            success
+            issue {{ {ISSUE_FIELDS} url }}
+          }}
+        }}
+        """,
+        {"input": body},
+    )
+    if not d["issueCreate"]["success"]:
+        raise click.ClickException("create failed")
+    _emit(_flatten_issue(d["issueCreate"]["issue"]), out_fmt, fields, tmpl, quiet, id_only)
+
+
+@issues.command("update")
+@click.argument("ident")
+@click.option("--title", "-T")
+@click.option("--description", "-d")
+@click.option("--priority", "-p", type=int)
+@click.option("--state", "-s")
+@click.option("--assignee", "-a")
+@click.option("--labels", "-l", multiple=True)
+@click.option("--due")
+@click.option("--estimate", "-e", type=int)
+@click.option("--project")
+@click.option("--data", "data_json")
+@click.option("--dry-run", is_flag=True)
+@shared_output
+def issues_update(ident, title, description, priority, state, assignee, labels, due, estimate, project,
+                  data_json, dry_run, out_fmt, filters, fields, tmpl, limit, all_pages, quiet, id_only, no_pager):
+    cur = gql(
+        "query($id: String!) { issue(id: $id) { id team { id key } " + ISSUE_FIELDS + " } }",
+        {"id": ident},
+    )["issue"]
+    if not cur:
+        raise click.ClickException(f"not found: {ident}")
+    t_id = cur["team"]["id"]
+    t = _team_full(t_id)
+    body: dict[str, Any] = {}
+    if title is not None: body["title"] = title
+    if description == "-": description = sys.stdin.read()
+    if description is not None: body["description"] = description
+    if priority is not None: body["priority"] = priority
+    if state: body["stateId"] = _resolve_state(t, state)
+    if assignee: body["assigneeId"] = _resolve_user(assignee)
+    if labels: body["labelIds"] = _resolve_labels(t, list(labels))
+    if due is not None: body["dueDate"] = _resolve_due(due)
+    if estimate is not None: body["estimate"] = estimate
+    if project is not None:
+        body["projectId"] = None if project.lower() == "none" else _resolve_project(project)
+    body = _merge_data(body, data_json)
+    if dry_run:
+        click.echo(json.dumps(body, indent=2))
+        return
+    d = gql(
+        f"""
+        mutation($id: String!, $input: IssueUpdateInput!) {{
+          issueUpdate(id: $id, input: $input) {{
+            success
+            issue {{ {ISSUE_FIELDS} }}
+          }}
+        }}
+        """,
+        {"id": cur["id"], "input": body},
+    )
+    if not d["issueUpdate"]["success"]:
+        raise click.ClickException("update failed")
+    _emit(_flatten_issue(d["issueUpdate"]["issue"]), out_fmt, fields, tmpl, quiet, id_only)
+
+
+@issues.command("delete")
+@click.argument("ident")
+@click.option("--yes", is_flag=True, help="Skip confirmation")
+def issues_delete(ident, yes):
+    if not yes:
+        click.confirm(f"Delete {ident}?", abort=True)
+    cur = gql("query($id: String!) { issue(id: $id) { id } }", {"id": ident})["issue"]
+    if not cur:
+        raise click.ClickException(f"not found: {ident}")
+    d = gql("mutation($id: String!) { issueDelete(id: $id) { success } }", {"id": cur["id"]})
+    click.echo("deleted" if d["issueDelete"]["success"] else "delete failed")
+
+
+def _quick_state(ident: str, target_type: str) -> None:
+    cur = gql(
+        "query($id: String!) { issue(id: $id) { id team { id } } }",
+        {"id": ident},
+    )["issue"]
+    if not cur:
+        raise click.ClickException(f"not found: {ident}")
+    t_id = cur["team"]["id"]
+    team = _team_full(t_id)
+    state = next((s for s in team["states"]["nodes"] if s["type"] == target_type), None)
+    if not state:
+        raise click.ClickException(f"no state of type {target_type} in team")
+    body = {"stateId": state["id"]}
+    if target_type == "started":
+        body["assigneeId"] = _viewer()["id"]
+    d = gql(
+        "mutation($id: String!, $input: IssueUpdateInput!) { issueUpdate(id: $id, input: $input) { success } }",
+        {"id": cur["id"], "input": body},
+    )
+    if not d["issueUpdate"]["success"]:
+        raise click.ClickException("update failed")
+    click.echo(f"{ident} -> {state['name']}")
+
+
+@issues.command("start")
+@click.argument("ident")
+def issues_start(ident): _quick_state(ident, "started")
+
+
+@issues.command("stop")
+@click.argument("ident")
+def issues_stop(ident): _quick_state(ident, "backlog")
+
+
+@issues.command("close")
+@click.argument("ident")
+def issues_close(ident): _quick_state(ident, "completed")
+
+
+@issues.command("assign")
+@click.argument("ident")
+@click.argument("user")
+def issues_assign(ident, user):
+    cur = gql("query($id: String!) { issue(id: $id) { id } }", {"id": ident})["issue"]
+    if not cur:
+        raise click.ClickException(f"not found: {ident}")
+    uid = _resolve_user(user)
+    d = gql(
+        "mutation($id: String!, $input: IssueUpdateInput!) { issueUpdate(id: $id, input: $input) { success } }",
+        {"id": cur["id"], "input": {"assigneeId": uid}},
+    )
+    click.echo("ok" if d["issueUpdate"]["success"] else "failed")
+
+
+@issues.command("comment")
+@click.argument("ident")
+@click.option("--body", "-b", required=True)
+@click.option("--parent-id")
+def issues_comment(ident, body, parent_id):
+    if body == "-":
+        body = sys.stdin.read()
+    cur = gql("query($id: String!) { issue(id: $id) { id } }", {"id": ident})["issue"]
+    if not cur:
+        raise click.ClickException(f"not found: {ident}")
+    inp: dict[str, Any] = {"issueId": cur["id"], "body": body}
+    if parent_id:
+        inp["parentId"] = parent_id
+    d = gql(
+        "mutation($input: CommentCreateInput!) { commentCreate(input: $input) { success comment { id } } }",
+        {"input": inp},
+    )
+    if not d["commentCreate"]["success"]:
+        raise click.ClickException("comment failed")
+    click.echo(d["commentCreate"]["comment"]["id"])
+
+
+@issues.command("move")
+@click.argument("ident")
+@click.argument("project_name")
+def issues_move(ident, project_name):
+    cur = gql("query($id: String!) { issue(id: $id) { id } }", {"id": ident})["issue"]
+    if not cur:
+        raise click.ClickException(f"not found: {ident}")
+    pid = _resolve_project(project_name)
+    d = gql(
+        "mutation($id: String!, $input: IssueUpdateInput!) { issueUpdate(id: $id, input: $input) { success } }",
+        {"id": cur["id"], "input": {"projectId": pid}},
+    )
+    click.echo("ok" if d["issueUpdate"]["success"] else "failed")
+
+
+@issues.command("transfer")
+@click.argument("ident")
+@click.argument("team_name")
+def issues_transfer(ident, team_name):
+    cur = gql("query($id: String!) { issue(id: $id) { id } }", {"id": ident})["issue"]
+    if not cur:
+        raise click.ClickException(f"not found: {ident}")
+    tid = _team(team_name)["id"]
+    d = gql(
+        "mutation($id: String!, $input: IssueUpdateInput!) { issueUpdate(id: $id, input: $input) { success } }",
+        {"id": cur["id"], "input": {"teamId": tid}},
+    )
+    click.echo("ok" if d["issueUpdate"]["success"] else "failed")
+
+
+@issues.command("open")
+@click.argument("ident")
+def issues_open(ident):
+    cur = gql("query($id: String!) { issue(id: $id) { url } }", {"id": ident})["issue"]
+    if not cur:
+        raise click.ClickException(f"not found: {ident}")
+    webbrowser.open(cur["url"])
+    click.echo(cur["url"])
+
+
+@issues.command("link")
+@click.argument("ident")
+def issues_link(ident):
+    cur = gql("query($id: String!) { issue(id: $id) { url } }", {"id": ident})["issue"]
+    if not cur:
+        raise click.ClickException(f"not found: {ident}")
+    click.echo(cur["url"])
+
+
+# ---------------------------------------------------------------- comments
+
+@cli.group()
+def comments():
+    """Comment operations."""
+
+
+@comments.command("list")
+@click.argument("ident")
+@shared_output
+def comments_list(ident, out_fmt, filters, fields, tmpl, limit, all_pages, quiet, id_only, no_pager):
+    d = gql(
+        "query($id: String!) { issue(id: $id) { comments(first: 100) { nodes { id body createdAt user { name } } } } }",
+        {"id": ident},
+    )
+    if not d["issue"]:
+        raise click.ClickException(f"not found: {ident}")
+    nodes = d["issue"]["comments"]["nodes"]
+    if filters: nodes = _filter(nodes, list(filters))
+    if fmt := (out_fmt if out_fmt != "table" else None):
+        _emit(nodes, fmt, fields, tmpl, quiet, id_only)
+    else:
+        for c in nodes:
+            who = (c.get("user") or {}).get("name", "?")
+            click.echo(f"\n--- {who} at {c['createdAt']} ---")
+            click.echo(c["body"])
+
+
+@comments.command("create")
+@click.argument("ident")
+@click.option("--body", "-b", required=True)
+@click.option("--parent-id")
+def comments_create(ident, body, parent_id):
+    # Reuse the issues comment implementation
+    ctx = click.Context(issues_comment)
+    ctx.invoke(issues_comment, ident=ident, body=body, parent_id=parent_id)
+
+
+# ---------------------------------------------------------------- projects
+
+@cli.group()
+def projects():
+    """Project operations."""
+
+
+@projects.command("list")
+@click.option("--team", "-t")
+@shared_output
+def projects_list(team, out_fmt, filters, fields, tmpl, limit, all_pages, quiet, id_only, no_pager):
+    if team:
+        d = gql(
+            "query($key: String!) { team(id: $key) { projects(first: 100) { nodes { id name state startDate targetDate } } } }",
+            {"key": _team(team)["id"]},
+        )
+        nodes = d["team"]["projects"]["nodes"]
+    else:
+        d = gql("{ projects(first: 100) { nodes { id name state startDate targetDate } } }")
+        nodes = d["projects"]["nodes"]
+    if filters: nodes = _filter(nodes, list(filters))
+    if out_fmt == "table":
+        click.echo(f"{'NAME':<40} STATE")
+        for p in nodes:
+            click.echo(f"{p['name'][:40]:<40} {p.get('state', '')}")
+    else:
+        _emit(nodes, out_fmt, fields, tmpl, quiet, id_only)
+
+
+@projects.command("get")
+@click.argument("ident")
+def projects_get(ident):
+    pid = _resolve_project(ident)
+    d = gql(
+        "query($id: String!) { project(id: $id) { id name description state startDate targetDate teams { nodes { name } } } }",
+        {"id": pid},
+    )
+    click.echo(json.dumps(d["project"], indent=2, default=str))
+
+
+@projects.command("create")
+@click.argument("name")
+@click.option("--team", "-t")
+@click.option("--description", "-d")
+def projects_create(name, team, description):
+    team = team or os.environ.get("LINEAR_DEFAULT_TEAM")
+    if not team:
+        raise click.ClickException("--team required (or set LINEAR_DEFAULT_TEAM)")
+    t = _team(team)
+    body: dict[str, Any] = {"name": name, "teamIds": [t["id"]]}
+    if description: body["description"] = description
+    d = gql(
+        "mutation($input: ProjectCreateInput!) { projectCreate(input: $input) { success project { id name } } }",
+        {"input": body},
+    )
+    if not d["projectCreate"]["success"]:
+        raise click.ClickException("create failed")
+    click.echo(d["projectCreate"]["project"]["id"])
+
+
+@projects.command("update")
+@click.argument("ident")
+@click.option("--name")
+@click.option("--description")
+@click.option("--status")
+def projects_update(ident, name, description, status):
+    pid = _resolve_project(ident)
+    body: dict[str, Any] = {}
+    if name: body["name"] = name
+    if description: body["description"] = description
+    if status: body["state"] = status
+    d = gql(
+        "mutation($id: String!, $input: ProjectUpdateInput!) { projectUpdate(id: $id, input: $input) { success } }",
+        {"id": pid, "input": body},
+    )
+    click.echo("ok" if d["projectUpdate"]["success"] else "failed")
+
+
+# ---------------------------------------------------------------- cycles
+
+@cli.group()
+def cycles():
+    """Cycle operations."""
+
+
+@cycles.command("list")
+@click.option("--team", "-t")
+def cycles_list(team):
+    if team:
+        d = gql(
+            "query($id: String!) { team(id: $id) { cycles(first: 50) { nodes { id name number startsAt endsAt } } } }",
+            {"id": _team(team)["id"]},
+        )
+        nodes = d["team"]["cycles"]["nodes"]
+    else:
+        d = gql("{ cycles(first: 100) { nodes { id name number startsAt endsAt team { name } } } }")
+        nodes = d["cycles"]["nodes"]
+    click.echo(json.dumps(nodes, indent=2, default=str))
+
+
+# ---------------------------------------------------------------- teams/users/labels/whoami
+
+@cli.group()
+def teams():
+    """Team operations."""
+
+
+@teams.command("list")
+def teams_list():
+    for t in _teams_meta():
+        click.echo(f"{t['key']:<8} {t['name']:<30} {t['id']}")
+
+
+@cli.group()
+def users():
+    """User operations."""
+
+
+@users.command("list")
+def users_list():
+    for u in _users():
+        click.echo(f"{u['name']:<30} {u.get('email','') or '':<35} {u['id']}")
+
+
+@cli.group()
+def labels():
+    """Label operations."""
+
+
+@labels.command("list")
+@click.option("--team", "-t")
+def labels_list(team):
+    if team:
+        t = _team(team)
+        rows = [{"id": l["id"], "name": l["name"], "team": t["name"]} for l in t["labels"]["nodes"]]
+    else:
+        rows = []
+        for tm in _teams_meta():
+            full = _team_full(tm["id"])
+            rows.extend(
+                {"id": l["id"], "name": l["name"], "team": full["name"]}
+                for l in full["labels"]["nodes"]
+            )
+    for l in rows:
+        click.echo(f"{l['name']:<30} {l.get('team',''):<15} {l['id']}")
+
+
+@cli.command()
+def whoami():
+    """Print authenticated user."""
+    v = _viewer()
+    click.echo(f"{v['name']} <{v['email']}>")
+    click.echo(v["id"])
+
+
+# ---------------------------------------------------------------- search
+
+@cli.group()
+def search():
+    """Search operations."""
+
+
+@search.command("issues")
+@click.argument("query")
+@click.option("--limit", type=int, default=25)
+def search_issues(query, limit):
+    d = gql(
+        f"""
+        query($q: String!, $first: Int) {{
+          issueSearch(term: $q, first: $first) {{ nodes {{ {ISSUE_FIELDS} }} }}
+        }}
+        """,
+        {"q": query, "first": limit},
+    )
+    nodes = [_flatten_issue(i) for i in d["issueSearch"]["nodes"]]
+    _emit(nodes, "table", None, None, False, False)
+
+
+@search.command("projects")
+@click.argument("query")
+@click.option("--limit", type=int, default=25)
+def search_projects(query, limit):
+    d = gql(
+        "query($q: String!, $first: Int) { projectSearch(term: $q, first: $first) { nodes { id name description state } } }",
+        {"q": query, "first": limit},
+    )
+    for p in d["projectSearch"]["nodes"]:
+        click.echo(f"{p['name']:<40} {p.get('state','')}")
+
+
+# ---------------------------------------------------------------- bulk
+
+@cli.group()
+def bulk():
+    """Bulk operations across multiple issues."""
+
+
+@bulk.command("update-state")
+@click.option("--state", "-s", required=True)
+@click.argument("idents", nargs=-1, required=True)
+@click.option("--dry-run", is_flag=True)
+def bulk_update_state(state, idents, dry_run):
+    for i in idents:
+        if dry_run:
+            click.echo(f"would set {i} -> {state}")
+            continue
+        cur = gql("query($id: String!) { issue(id: $id) { id team { id } } }", {"id": i})["issue"]
+        if not cur:
+            click.echo(f"warn: not found: {i}", err=True); continue
+        team = _team_full(cur["team"]["id"])
+        sid = _resolve_state(team, state)
+        d = gql(
+            "mutation($id: String!, $input: IssueUpdateInput!) { issueUpdate(id: $id, input: $input) { success } }",
+            {"id": cur["id"], "input": {"stateId": sid}},
+        )
+        click.echo(f"{i}: {'ok' if d['issueUpdate']['success'] else 'failed'}")
+
+
+@bulk.command("assign")
+@click.option("--user", required=True)
+@click.argument("idents", nargs=-1, required=True)
+@click.option("--dry-run", is_flag=True)
+def bulk_assign(user, idents, dry_run):
+    uid = _resolve_user(user)
+    for i in idents:
+        if dry_run:
+            click.echo(f"would assign {i} -> {user}"); continue
+        cur = gql("query($id: String!) { issue(id: $id) { id } }", {"id": i})["issue"]
+        if not cur:
+            click.echo(f"warn: not found: {i}", err=True); continue
+        d = gql(
+            "mutation($id: String!, $input: IssueUpdateInput!) { issueUpdate(id: $id, input: $input) { success } }",
+            {"id": cur["id"], "input": {"assigneeId": uid}},
+        )
+        click.echo(f"{i}: {'ok' if d['issueUpdate']['success'] else 'failed'}")
+
+
+@bulk.command("unassign")
+@click.argument("idents", nargs=-1, required=True)
+@click.option("--dry-run", is_flag=True)
+def bulk_unassign(idents, dry_run):
+    for i in idents:
+        if dry_run:
+            click.echo(f"would unassign {i}"); continue
+        cur = gql("query($id: String!) { issue(id: $id) { id } }", {"id": i})["issue"]
+        if not cur:
+            click.echo(f"warn: not found: {i}", err=True); continue
+        d = gql(
+            "mutation($id: String!, $input: IssueUpdateInput!) { issueUpdate(id: $id, input: $input) { success } }",
+            {"id": cur["id"], "input": {"assigneeId": None}},
+        )
+        click.echo(f"{i}: {'ok' if d['issueUpdate']['success'] else 'failed'}")
+
+
+@bulk.command("label")
+@click.option("--add", "add_label")
+@click.option("--remove", "remove_label")
+@click.argument("idents", nargs=-1, required=True)
+@click.option("--dry-run", is_flag=True)
+def bulk_label(add_label, remove_label, idents, dry_run):
+    if not (add_label or remove_label):
+        raise click.ClickException("use --add or --remove")
+    for i in idents:
+        if dry_run:
+            click.echo(f"would change labels on {i}"); continue
+        cur = gql(
+            "query($id: String!) { issue(id: $id) { id labels(first: 50) { nodes { id name } } team { id } } }",
+            {"id": i},
+        )["issue"]
+        if not cur:
+            click.echo(f"warn: not found: {i}", err=True); continue
+        team = _team_full(cur["team"]["id"])
+        ids = {l["id"] for l in cur["labels"]["nodes"]}
+        if add_label:
+            ids |= set(_resolve_labels(team, [add_label]))
+        if remove_label:
+            rm = set(_resolve_labels(team, [remove_label]))
+            ids -= rm
+        d = gql(
+            "mutation($id: String!, $input: IssueUpdateInput!) { issueUpdate(id: $id, input: $input) { success } }",
+            {"id": cur["id"], "input": {"labelIds": list(ids)}},
+        )
+        click.echo(f"{i}: {'ok' if d['issueUpdate']['success'] else 'failed'}")
+
+
+# ---------------------------------------------------------------- attachments
+
+@cli.group()
+def attachments():
+    """Attachment listing (read-only convenience)."""
+
+
+@attachments.command("list")
+@click.argument("ident")
+def attachments_list(ident):
+    d = gql(
+        "query($id: String!) { issue(id: $id) { attachments { nodes { id title url } } } }",
+        {"id": ident},
+    )
+    if not d["issue"]:
+        raise click.ClickException(f"not found: {ident}")
+    for a in d["issue"]["attachments"]["nodes"]:
+        click.echo(f"{a['id']}  {a['title']}  {a['url']}")
+
+
+# ---------------------------------------------------------------- main
+
+if __name__ == "__main__":
+    cli()
