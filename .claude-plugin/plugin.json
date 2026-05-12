@@ -1,0 +1,8 @@
+{
+  "name": "claude-skills",
+  "description": "Personal grab-bag of Claude Code skills: gh, grafana, slack-cli, linear-cli, issue, things3, archive-sessions, claude-diff, skill-creator.",
+  "author": {
+    "name": "Ruslan Khozinov",
+    "url": "https://github.com/rkhozinov"
+  }
+}

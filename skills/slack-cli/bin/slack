@@ -1,0 +1,372 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["requests"]
+# ///
+"""Thin Slack Web API CLI using xoxp from macOS Keychain.
+
+Subcommands: mentions, dms, thread, reply, send, search, raw, whoami.
+
+Output is a numbered table by default. Pass --json for raw API responses.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+from typing import Any
+
+import requests
+
+API = "https://slack.com/api"
+KEYCHAIN_ACCOUNT = os.environ["USER"]
+KEYCHAIN_SERVICE = "slack-xoxp"
+SELF_USER_ID_CACHE: str | None = None
+
+
+# --- auth ----------------------------------------------------------------
+
+def get_token() -> str:
+    if (env := os.environ.get("SLACK_XOXP")):
+        return env
+    out = subprocess.run(
+        ["security", "find-generic-password", "-a", KEYCHAIN_ACCOUNT, "-s", KEYCHAIN_SERVICE, "-w"],
+        check=True, capture_output=True, text=True,
+    )
+    return out.stdout.strip()
+
+
+_session: requests.Session | None = None
+
+
+def session() -> requests.Session:
+    global _session
+    if _session is None:
+        _session = requests.Session()
+        _session.headers["Authorization"] = f"Bearer {get_token()}"
+    return _session
+
+
+def call(method: str, *, params: dict | None = None, json_body: dict | None = None) -> dict:
+    url = f"{API}/{method}"
+    if json_body is not None:
+        r = session().post(url, json=json_body, headers={"Content-Type": "application/json; charset=utf-8"})
+    else:
+        r = session().get(url, params=params or {})
+    r.raise_for_status()
+    data = r.json()
+    if not data.get("ok"):
+        raise SystemExit(f"slack api error: {method}: {data.get('error')} (warn={data.get('warning')})")
+    return data
+
+
+def me() -> str:
+    global SELF_USER_ID_CACHE
+    if SELF_USER_ID_CACHE is None:
+        SELF_USER_ID_CACHE = call("auth.test")["user_id"]
+    return SELF_USER_ID_CACHE
+
+
+# --- formatting helpers --------------------------------------------------
+
+def relative_age(ts: str | float) -> str:
+    d = int(time.time() - float(ts))
+    if d < 60:
+        return f"{d}s"
+    if d < 3600:
+        return f"{d // 60}m"
+    if d < 86400:
+        return f"{d // 3600}h"
+    return f"{d // 86400}d"
+
+
+def truncate(s: str, n: int) -> str:
+    s = re.sub(r"\s+", " ", s).strip()
+    return s if len(s) <= n else s[: n - 1] + "…"
+
+
+def print_table(rows: list[list[str]]) -> None:
+    """Print rows aligned by column. First col always row index [N]."""
+    if not rows:
+        print("(no rows)")
+        return
+    cols = max(len(r) for r in rows)
+    widths = [0] * cols
+    for r in rows:
+        for i, cell in enumerate(r):
+            widths[i] = max(widths[i], len(cell))
+    for r in rows:
+        line = "  ".join(cell.ljust(widths[i]) for i, cell in enumerate(r) if i < cols - 1)
+        last = r[-1] if r else ""
+        print(f"{line}  {last}".rstrip() if line else last)
+
+
+# --- subcommand: mentions -----------------------------------------------
+
+def cmd_mentions(args: argparse.Namespace) -> None:
+    data = call(
+        "search.messages",
+        params={
+            "query": f"<@{me()}>",
+            "sort": "timestamp",
+            "sort_dir": "desc",
+            "count": args.n,
+        },
+    )
+    if args.json:
+        print(json.dumps(data, indent=2))
+        return
+    matches = data["messages"]["matches"]
+    rows = []
+    for i, m in enumerate(matches, 1):
+        rows.append([
+            f"[{i}]",
+            relative_age(m["ts"]),
+            f"#{m['channel']['name']}",
+            f"@{m.get('username', '?')}",
+            truncate(m.get("text", ""), 110),
+            m.get("permalink", ""),
+        ])
+    print_table(rows)
+
+
+# --- subcommand: dms -----------------------------------------------------
+
+def cmd_dms(args: argparse.Namespace) -> None:
+    types = "im,mpim" if args.group else "im"
+    chans = call(
+        "users.conversations",
+        params={"types": types, "limit": 100, "exclude_archived": "true"},
+    )["channels"]
+
+    user_cache: dict[str, str] = {}
+
+    def name_of(uid: str) -> str:
+        if uid not in user_cache:
+            try:
+                u = call("users.info", params={"user": uid})["user"]
+                user_cache[uid] = u.get("profile", {}).get("real_name") or u.get("name") or uid
+            except SystemExit:
+                user_cache[uid] = uid
+        return user_cache[uid]
+
+    rows_raw: list[tuple[float, str, str, str]] = []
+    for c in chans:
+        h = call("conversations.history", params={"channel": c["id"], "limit": 1})
+        msgs = h.get("messages") or []
+        if not msgs:
+            continue
+        m = msgs[0]
+        ts = float(m["ts"])
+        if c.get("is_im"):
+            peer = name_of(c["user"])
+        else:
+            peer = c.get("name") or "(group)"
+        from_id = m.get("user") or m.get("bot_id") or "?"
+        direction = "me" if from_id == me() else "them"
+        rows_raw.append((ts, peer, direction, m.get("text", "")))
+
+    rows_raw.sort(reverse=True)
+    rows_raw = rows_raw[: args.n]
+
+    if args.json:
+        print(json.dumps(
+            [{"ts": ts, "peer": p, "dir": d, "text": t} for ts, p, d, t in rows_raw],
+            indent=2,
+        ))
+        return
+
+    rows = []
+    for i, (ts, peer, direction, text) in enumerate(rows_raw, 1):
+        rows.append([
+            f"[{i}]",
+            relative_age(ts),
+            peer,
+            f"({direction})",
+            truncate(text, 110),
+        ])
+    print_table(rows)
+
+
+# --- subcommand: thread --------------------------------------------------
+
+def cmd_thread(args: argparse.Namespace) -> None:
+    data = call(
+        "conversations.replies",
+        params={"channel": args.channel, "ts": args.ts},
+    )
+    if args.json:
+        print(json.dumps(data, indent=2))
+        return
+    for m in data.get("messages", []):
+        author = m.get("user") or m.get("bot_id") or "?"
+        ts = m["ts"]
+        text = re.sub(r"\s+\n", "\n", m.get("text", ""))
+        print(f"--- [{ts}] @{author} ({relative_age(ts)})")
+        print(text)
+        print()
+
+
+# --- subcommand: reply / send -------------------------------------------
+
+def cmd_send(args: argparse.Namespace) -> None:
+    body: dict[str, Any] = {"channel": args.channel, "text": args.text}
+    if getattr(args, "thread_ts", None):
+        body["thread_ts"] = args.thread_ts
+    data = call("chat.postMessage", json_body=body)
+    if args.json:
+        print(json.dumps(data, indent=2))
+    else:
+        print(f"posted ts={data['ts']} channel={data['channel']}")
+
+
+# --- subcommand: search --------------------------------------------------
+
+def cmd_search(args: argparse.Namespace) -> None:
+    data = call(
+        "search.messages",
+        params={
+            "query": args.query,
+            "sort": "timestamp",
+            "sort_dir": "desc",
+            "count": args.n,
+        },
+    )
+    if args.json:
+        print(json.dumps(data, indent=2))
+        return
+    rows = []
+    for i, m in enumerate(data["messages"]["matches"], 1):
+        rows.append([
+            f"[{i}]",
+            relative_age(m["ts"]),
+            f"#{m['channel']['name']}",
+            f"@{m.get('username', '?')}",
+            truncate(m.get("text", ""), 110),
+            m.get("permalink", ""),
+        ])
+    print_table(rows)
+
+
+# --- subcommand: raw -----------------------------------------------------
+
+def cmd_raw(args: argparse.Namespace) -> None:
+    """Generic escape hatch: `slack raw <method> k=v k=v ...` (GET) or `--post` (JSON body)."""
+    payload = {}
+    for kv in args.kv:
+        if "=" not in kv:
+            raise SystemExit(f"bad k=v pair: {kv}")
+        k, v = kv.split("=", 1)
+        payload[k] = v
+    data = (
+        call(args.method, json_body=payload)
+        if args.post
+        else call(args.method, params=payload)
+    )
+    print(json.dumps(data, indent=2))
+
+
+# --- subcommand: file ----------------------------------------------------
+
+def cmd_file(args: argparse.Namespace) -> None:
+    info = call("files.info", params={"file": args.file_id})["file"]
+    url = info["url_private_download"]
+    name = info["name"]
+
+    if args.o == "-":
+        out = sys.stdout.buffer
+        path = "<stdout>"
+    else:
+        if args.o is None:
+            path = name
+        elif os.path.isdir(args.o) or args.o.endswith("/"):
+            path = os.path.join(args.o, name)
+        else:
+            path = args.o
+        out = open(path, "wb")
+
+    r = session().get(url, allow_redirects=True, stream=True)
+    r.raise_for_status()
+    n = 0
+    for chunk in r.iter_content(chunk_size=65536):
+        out.write(chunk)
+        n += len(chunk)
+    if out is not sys.stdout.buffer:
+        out.close()
+    print(f"wrote {path} ({n} bytes)", file=sys.stderr)
+
+
+# --- subcommand: whoami --------------------------------------------------
+
+def cmd_whoami(args: argparse.Namespace) -> None:
+    data = call("auth.test")
+    if args.json:
+        print(json.dumps(data, indent=2))
+    else:
+        print(f"user={data['user']} user_id={data['user_id']} team={data['team']} url={data['url']}")
+
+
+# --- argparse ------------------------------------------------------------
+
+def main() -> None:
+    p = argparse.ArgumentParser(prog="slack", description=__doc__)
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--json", action="store_true", help="emit raw JSON")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    pm = sub.add_parser("mentions", parents=[common], help="recent @mentions of self")
+    pm.add_argument("-n", type=int, default=20)
+    pm.set_defaults(func=cmd_mentions)
+
+    pd = sub.add_parser("dms", parents=[common], help="recent DMs")
+    pd.add_argument("-n", type=int, default=15)
+    pd.add_argument("--group", action="store_true", help="include group DMs (mpim)")
+    pd.set_defaults(func=cmd_dms)
+
+    pt = sub.add_parser("thread", parents=[common], help="print a thread")
+    pt.add_argument("channel")
+    pt.add_argument("ts")
+    pt.set_defaults(func=cmd_thread)
+
+    pr = sub.add_parser("reply", parents=[common], help="reply in a thread")
+    pr.add_argument("channel")
+    pr.add_argument("thread_ts")
+    pr.add_argument("text")
+    pr.set_defaults(func=cmd_send)
+
+    ps = sub.add_parser("send", parents=[common], help="send a top-level message")
+    ps.add_argument("channel")
+    ps.add_argument("text")
+    ps.set_defaults(func=cmd_send)
+
+    pq = sub.add_parser("search", parents=[common], help="search messages (slack query syntax)")
+    pq.add_argument("query")
+    pq.add_argument("-n", type=int, default=20)
+    pq.set_defaults(func=cmd_search)
+
+    pr2 = sub.add_parser("raw", parents=[common], help="raw API call: slack raw <method> k=v ...")
+    pr2.add_argument("method")
+    pr2.add_argument("kv", nargs="*", default=[])
+    pr2.add_argument("--post", action="store_true", help="POST as JSON body instead of GET")
+    pr2.set_defaults(func=cmd_raw)
+
+    pf = sub.add_parser("file", parents=[common], help="download a file by id")
+    pf.add_argument("file_id")
+    pf.add_argument("-o", help="output path or '-' for stdout (default: file's name in cwd)")
+    pf.set_defaults(func=cmd_file)
+
+    pw = sub.add_parser("whoami", parents=[common], help="auth.test result")
+    pw.set_defaults(func=cmd_whoami)
+
+    args = p.parse_args()
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()
