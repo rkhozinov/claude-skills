@@ -35,8 +35,9 @@ slack whoami                                  # auth.test (sanity check)
 slack mentions [-n 20]                        # @mentions of self, newest first
 slack dms      [-n 15] [--group]              # latest msg per 1:1 DM (--group adds mpim)
 slack thread   <channel-id> <thread-ts>       # full thread
-slack reply    <channel-id> <thread-ts> <txt> # post reply in thread
-slack send     <channel-id> <txt>             # post top-level message
+slack reply    <channel-id> <thread-ts> [txt] # post reply in thread
+slack send     <channel-id> [txt]             # post top-level message
+#   send/reply also take --text-file <path|->  (body from file or stdin; preferred — see below)
 slack search   '<query>' [-n 20]              # slack-search-bar syntax
 slack file     <file-id> [-o <path>]          # download a file by id (default: ./<name>; -o - for stdout)
 slack raw      <method> [k=v …] [--post]      # escape hatch: any Web API method
@@ -49,7 +50,19 @@ slack <cmd> --json                            # raw API JSON instead of formatte
 
 Output format:
 - Default: numbered table — first column is `[N]`, last column is the permalink (mentions/search) or text (dms). Reference rows by index when iterating ("open thread #3").
-- `--json`: raw Slack response, suitable for `| jq`.
+- `--json`: raw Slack response, suitable for `| jq`. `dms --json` rows carry `channel_id` (`D…`) + `user_id` (peer's `U…`, null for group) — so you can reply to a DM straight from the listing without a second lookup.
+
+### Sending text: prefer `--text-file`
+
+For anything beyond a trivial one-liner, pass the body via `--text-file <path>` (or `--text-file -` for stdin) instead of the inline positional. Inline text goes through the shell, so backticks, `$(...)`, quotes, and newlines get mangled or trigger command substitution — the same class of failure that mandates `gh ... --body-file` over `--body`. The file path is read verbatim, no shell interpretation. Write the body with a Write tool to a tmpfile, then point `--text-file` at it.
+
+```bash
+# robust: multi-line / backticks / quotes survive intact
+slack send D0AGABWHTSA --text-file /tmp/msg.md
+slack reply C0… 1778164397.756779 --text-file -   <<'EOF'
+done — see `Program.cs:477`. shipped in #709.
+EOF
+```
 
 ## Common patterns
 
@@ -67,9 +80,14 @@ slack file F0B3R03TR4G                        # writes ./id_argus_a6000.pub
 slack file F0B2UKBUC86 -o ~/.ssh/             # writes ~/.ssh/id_argus_a6000
 slack file F0… -o -                           # stream to stdout for piping
 
-# DM a user by email
-UID=$(slack raw users.lookupByEmail email=alice@example.com | jq -r '.user.id')
-slack send "$UID" "ping — got a sec?"
+# DM a user by email (UID is readonly in bash — use PEER_ID)
+PEER_ID=$(slack raw users.lookupByEmail email=alice@example.com | jq -r '.user.id')
+slack send "$PEER_ID" "ping — got a sec?"
+
+# reply to a DM straight from the listing (channel_id is in the json)
+CH=$(slack dms --json | jq -r '.[] | select(.peer=="<person>") | .channel_id')
+TS=$(slack dms --json | jq -r '.[] | select(.peer=="<person>") | .ts')
+slack reply "$CH" "$TS" --text-file /tmp/reply.md
 
 # react to a message
 slack raw reactions.add channel=C… timestamp=1714… name=thumbsup --post

@@ -156,7 +156,7 @@ def cmd_dms(args: argparse.Namespace) -> None:
                 user_cache[uid] = uid
         return user_cache[uid]
 
-    rows_raw: list[tuple[float, str, str, str]] = []
+    rows_raw: list[dict[str, Any]] = []
     for c in chans:
         h = call("conversations.history", params={"channel": c["id"], "limit": 1})
         msgs = h.get("messages") or []
@@ -170,26 +170,31 @@ def cmd_dms(args: argparse.Namespace) -> None:
             peer = c.get("name") or "(group)"
         from_id = m.get("user") or m.get("bot_id") or "?"
         direction = "me" if from_id == me() else "them"
-        rows_raw.append((ts, peer, direction, m.get("text", "")))
+        rows_raw.append({
+            "ts": m["ts"],
+            "channel_id": c["id"],
+            "user_id": c.get("user"),  # the peer's U… (im only); None for group
+            "peer": peer,
+            "dir": direction,
+            "text": m.get("text", ""),
+        })
 
-    rows_raw.sort(reverse=True)
+    rows_raw.sort(key=lambda r: float(r["ts"]), reverse=True)
     rows_raw = rows_raw[: args.n]
 
     if args.json:
-        print(json.dumps(
-            [{"ts": ts, "peer": p, "dir": d, "text": t} for ts, p, d, t in rows_raw],
-            indent=2,
-        ))
+        # channel_id is reply-ready: `slack reply <channel_id> <ts> --text-file -`
+        print(json.dumps(rows_raw, indent=2))
         return
 
     rows = []
-    for i, (ts, peer, direction, text) in enumerate(rows_raw, 1):
+    for i, r in enumerate(rows_raw, 1):
         rows.append([
             f"[{i}]",
-            relative_age(ts),
-            peer,
-            f"({direction})",
-            truncate(text, 110),
+            relative_age(r["ts"]),
+            r["peer"],
+            f"({r['dir']})",
+            truncate(r["text"], 110),
         ])
     print_table(rows)
 
@@ -215,8 +220,23 @@ def cmd_thread(args: argparse.Namespace) -> None:
 
 # --- subcommand: reply / send -------------------------------------------
 
+def resolve_text(args: argparse.Namespace) -> str:
+    """Message body from --text-file (path, or '-' for stdin) or the positional arg.
+
+    Prefer --text-file for any message with backticks, quotes, newlines, or
+    shell metacharacters — it sidesteps shell quoting entirely (same reason
+    `gh ... --body-file` is mandated over inline --body)."""
+    src = getattr(args, "text_file", None)
+    if src:
+        data = sys.stdin.read() if src == "-" else open(src, encoding="utf-8").read()
+        return data.rstrip("\n")
+    if args.text is not None:
+        return args.text
+    raise SystemExit("no message text: pass a positional <text> or --text-file <path|->")
+
+
 def cmd_send(args: argparse.Namespace) -> None:
-    body: dict[str, Any] = {"channel": args.channel, "text": args.text}
+    body: dict[str, Any] = {"channel": args.channel, "text": resolve_text(args)}
     if getattr(args, "thread_ts", None):
         body["thread_ts"] = args.thread_ts
     data = call("chat.postMessage", json_body=body)
@@ -337,12 +357,14 @@ def main() -> None:
     pr = sub.add_parser("reply", parents=[common], help="reply in a thread")
     pr.add_argument("channel")
     pr.add_argument("thread_ts")
-    pr.add_argument("text")
+    pr.add_argument("text", nargs="?", help="inline body; omit when using --text-file")
+    pr.add_argument("--text-file", metavar="PATH", help="read body from file (or '-' for stdin); preferred for multi-line/backtick text")
     pr.set_defaults(func=cmd_send)
 
     ps = sub.add_parser("send", parents=[common], help="send a top-level message")
     ps.add_argument("channel")
-    ps.add_argument("text")
+    ps.add_argument("text", nargs="?", help="inline body; omit when using --text-file")
+    ps.add_argument("--text-file", metavar="PATH", help="read body from file (or '-' for stdin); preferred for multi-line/backtick text")
     ps.set_defaults(func=cmd_send)
 
     pq = sub.add_parser("search", parents=[common], help="search messages (slack query syntax)")
