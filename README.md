@@ -20,3 +20,4 @@ claude /plugin install claude-skills
 | `archive-sessions` | Compress old Claude Code session transcripts |
 | `claude-diff` | Open Zed / PyCharm visual diff for git changes |
 | `skill-creator` | Author, evaluate, and benchmark skills |
+| `awk-sed` | awk/sed one-liner reference for shell pipeline transforms |
