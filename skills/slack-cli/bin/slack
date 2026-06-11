@@ -5,29 +5,43 @@
 # ///
 """Thin Slack Web API CLI using xoxp from macOS Keychain.
 
-Subcommands: mentions, dms, thread, reply, send, search, raw, whoami.
+Subcommands: mentions, dms, history, thread, reply, send, search, channels,
+users, react, file, raw, whoami.
 
-Output is a numbered table by default. Pass --json for raw API responses.
+Reads render as clean, resolved, low-noise text by default (names, @-mentions,
+local timestamps, reaction/file/thread summaries). Pass --json for raw API
+responses; --no-resolve to skip name lookups on big pulls.
 """
 
 from __future__ import annotations
 
 import argparse
+import atexit
+import datetime
+import html
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 import time
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import requests
 
 API = "https://slack.com/api"
 KEYCHAIN_ACCOUNT = os.environ["USER"]
 KEYCHAIN_SERVICE = "slack-xoxp"
-SELF_USER_ID_CACHE: str | None = None
+SELF_AUTH_CACHE: dict | None = None           # full auth.test (user_id + workspace url)
+SELF_TZ_CACHE: datetime.tzinfo | None = None
+USER_CACHE: dict[str, tuple[str, str]] = {}   # user_id    -> (handle, real_name)
+USER_EMAIL: dict[str, str] = {}               # user_id    -> email (when known)
+CHANNEL_CACHE: dict[str, str] = {}            # channel_id -> name
+USER_BY_NAME: dict[str, str] = {}             # handle/real (lower) -> user_id
+CHANNEL_BY_NAME: dict[str, str] = {}          # name (lower)        -> channel_id
+RESOLVE: bool = True                          # output labeling; set from --no-resolve
+_CACHE_DIRTY: bool = False                    # persist on exit only if we learned anything
 
 
 # --- auth ----------------------------------------------------------------
@@ -66,11 +80,241 @@ def call(method: str, *, params: dict | None = None, json_body: dict | None = No
     return data
 
 
+def auth_info() -> dict:
+    global SELF_AUTH_CACHE
+    if SELF_AUTH_CACHE is None:
+        SELF_AUTH_CACHE = call("auth.test")
+    return SELF_AUTH_CACHE
+
+
 def me() -> str:
-    global SELF_USER_ID_CACHE
-    if SELF_USER_ID_CACHE is None:
-        SELF_USER_ID_CACHE = call("auth.test")["user_id"]
-    return SELF_USER_ID_CACHE
+    return auth_info()["user_id"]
+
+
+def workspace_url() -> str:
+    """Workspace base URL with trailing slash, e.g. https://<workspace>.slack.com/."""
+    return auth_info().get("url", "")
+
+
+# --- persistent resolution cache -----------------------------------------
+
+def _cache_dir() -> str:
+    base = os.environ.get("XDG_CACHE_HOME") or os.path.join(os.path.expanduser("~"), ".cache")
+    return os.path.join(base, "slack-cli")
+
+
+def mark_dirty() -> None:
+    global _CACHE_DIRTY
+    _CACHE_DIRTY = True
+
+
+def index_user(uid: str, handle: str, real: str, email: str | None = None) -> None:
+    USER_CACHE[uid] = (handle, real)
+    if handle:
+        USER_BY_NAME.setdefault(handle.lower(), uid)
+    if real:
+        USER_BY_NAME.setdefault(real.lower(), uid)
+    if email:
+        USER_EMAIL[uid] = email
+    mark_dirty()
+
+
+def index_channel(cid: str, name: str) -> None:
+    CHANNEL_CACHE[cid] = name
+    if name and name != cid:
+        CHANNEL_BY_NAME.setdefault(name.lower(), cid)
+    mark_dirty()
+
+
+def load_caches() -> None:
+    """Load persisted user/channel maps (best-effort) so resolution survives runs."""
+    d = _cache_dir()
+    try:
+        with open(os.path.join(d, "users.json")) as f:
+            for uid, v in json.load(f).items():
+                USER_CACHE[uid] = (v["handle"], v["real"])
+                if v.get("email"):
+                    USER_EMAIL[uid] = v["email"]
+                USER_BY_NAME.setdefault(v["handle"].lower(), uid)
+                USER_BY_NAME.setdefault(v["real"].lower(), uid)
+    except (OSError, ValueError, KeyError):
+        pass
+    try:
+        with open(os.path.join(d, "channels.json")) as f:
+            for cid, name in json.load(f).items():
+                CHANNEL_CACHE[cid] = name
+                CHANNEL_BY_NAME.setdefault(name.lower(), cid)
+    except (OSError, ValueError):
+        pass
+
+
+def save_caches() -> None:
+    if not _CACHE_DIRTY:
+        return
+    d = _cache_dir()
+    try:
+        os.makedirs(d, exist_ok=True)
+        users = {
+            uid: {"handle": h, "real": r, **({"email": USER_EMAIL[uid]} if uid in USER_EMAIL else {})}
+            for uid, (h, r) in USER_CACHE.items()
+            if not (h == uid and r == uid)  # drop failure sentinels
+        }
+        with open(os.path.join(d, "users.json"), "w") as f:
+            json.dump(users, f)
+        chans = {cid: n for cid, n in CHANNEL_CACHE.items() if n != cid}
+        with open(os.path.join(d, "channels.json"), "w") as f:
+            json.dump(chans, f)
+    except OSError:
+        pass
+
+
+# --- resolution (users, channels, mentions) ------------------------------
+
+def user_name(uid: str) -> tuple[str, str]:
+    """(handle, real_name) for a user id. RESOLVE-first so --no-resolve stays raw."""
+    if not RESOLVE:
+        return (uid, uid)
+    if uid in USER_CACHE:
+        return USER_CACHE[uid]
+    try:
+        u = call("users.info", params={"user": uid})["user"]
+        prof = u.get("profile", {})
+        handle = u.get("name") or uid
+        real = prof.get("real_name") or prof.get("display_name") or u.get("real_name") or handle
+        index_user(uid, handle, real, prof.get("email"))
+    except SystemExit:
+        USER_CACHE[uid] = (uid, uid)  # deleted/inaccessible — not indexed, not persisted
+    return USER_CACHE[uid]
+
+
+def channel_name(cid: str) -> str:
+    if not RESOLVE:
+        return cid
+    if cid in CHANNEL_CACHE:
+        return CHANNEL_CACHE[cid]
+    try:
+        c = call("conversations.info", params={"channel": cid})["channel"]
+        index_channel(cid, c.get("name") or cid)
+    except SystemExit:
+        CHANNEL_CACHE[cid] = cid
+    return CHANNEL_CACHE[cid]
+
+
+def warm_users() -> None:
+    """Bulk-fill the user cache via one tier-2 users.list walk (vs N tier-3 lookups)."""
+    cursor = ""
+    while True:
+        p: dict[str, Any] = {"limit": 200}
+        if cursor:
+            p["cursor"] = cursor
+        data = call("users.list", params=p)
+        for u in data.get("members", []):
+            prof = u.get("profile", {})
+            index_user(
+                u["id"],
+                u.get("name") or u["id"],
+                prof.get("real_name") or prof.get("display_name") or u.get("real_name") or u["id"],
+                prof.get("email"),
+            )
+        cursor = data.get("response_metadata", {}).get("next_cursor", "")
+        if not cursor:
+            break
+
+
+def list_channels(types: str) -> list[dict]:
+    """List all conversations of the given types (paged) and index their names."""
+    out: list[dict] = []
+    cursor = ""
+    while True:
+        p: dict[str, Any] = {"types": types, "limit": 1000, "exclude_archived": "true"}
+        if cursor:
+            p["cursor"] = cursor
+        data = call("conversations.list", params=p)
+        out.extend(data.get("channels", []))
+        cursor = data.get("response_metadata", {}).get("next_cursor", "")
+        if not cursor:
+            break
+    for c in out:
+        if c.get("name"):
+            index_channel(c["id"], c["name"])
+    return out
+
+
+def ensure_users_loaded() -> None:
+    if len(USER_CACHE) < 50:  # cold (empty disk cache) — one bulk walk
+        warm_users()
+
+
+def ensure_channels_loaded() -> None:
+    if not CHANNEL_BY_NAME:
+        list_channels("public_channel,private_channel")
+
+
+_ID_RE = re.compile(r"[CDGUW][A-Z0-9]{6,}")
+
+
+def resolve_user(arg: str) -> str:
+    """'@name' / 'Real Name' / 'U123' -> user id."""
+    s = arg.lstrip("@")
+    if _ID_RE.fullmatch(s):
+        return s
+    ensure_users_loaded()
+    uid = USER_BY_NAME.get(s.lower())
+    if not uid:
+        raise SystemExit(f"unknown user: {arg!r} (try `slack users {s}`)")
+    return uid
+
+
+def resolve_channel(arg: str) -> str:
+    """'#channel' / 'channel' / '@user' / id -> channel-or-user id (always, ignores RESOLVE)."""
+    if arg.startswith("@"):
+        return resolve_user(arg)
+    if _ID_RE.fullmatch(arg):
+        return arg
+    name = arg.lstrip("#").lower()
+    if name in CHANNEL_BY_NAME:
+        return CHANNEL_BY_NAME[name]
+    ensure_channels_loaded()
+    if name in CHANNEL_BY_NAME:
+        return CHANNEL_BY_NAME[name]
+    raise SystemExit(f"unknown channel: {arg!r} (try `slack channels`)")
+
+
+_MENTION_RE = re.compile(r"<(.*?)>")
+
+
+def resolve_mentions(text: str) -> str:
+    """Substitute Slack mrkdwn entities (<@U…>, <#C…>, links) then unescape HTML."""
+    if not text:
+        return text
+
+    def repl(m: re.Match[str]) -> str:
+        body = m.group(1)
+        if body.startswith("@"):  # user: <@U123> or <@U123|fallback>
+            uid = body[1:].split("|", 1)[0]
+            if uid.startswith(("U", "W")):
+                return f"@{user_name(uid)[1]}"
+            return f"@{body[1:]}"
+        if body.startswith("#"):  # channel: <#C123|label> or <#C123>
+            inner = body[1:]
+            if "|" in inner:
+                cid, label = inner.split("|", 1)
+                return f"#{label or channel_name(cid)}"
+            return f"#{channel_name(inner)}"
+        if body.startswith("!subteam^"):  # user-group: <!subteam^S123|@group>
+            rest = body.split("|", 1)
+            return rest[1] if len(rest) > 1 else "@group"
+        if body.startswith("!"):  # <!here>, <!channel>, <!date^…|fallback>
+            inner = body[1:]
+            if "|" in inner:
+                return inner.split("|", 1)[1]
+            return "@" + inner.split("^", 1)[0]
+        if "|" in body:  # link: <https://x|label>, <mailto:a@b|a@b>
+            url, label = body.split("|", 1)
+            return label or url
+        return body
+
+    return html.unescape(_MENTION_RE.sub(repl, text))
 
 
 # --- formatting helpers --------------------------------------------------
@@ -86,9 +330,55 @@ def relative_age(ts: str | float) -> str:
     return f"{d // 86400}d"
 
 
+def self_tz() -> datetime.tzinfo:
+    """Token owner's Slack-profile timezone (cached). Local TZ fallback."""
+    global SELF_TZ_CACHE
+    if SELF_TZ_CACHE is None:
+        try:
+            u = call("users.info", params={"user": me()})["user"]
+            prof = u.get("profile", {})
+            if RESOLVE and me() not in USER_CACHE:  # seed self while we have the payload
+                index_user(me(), u.get("name") or me(),
+                           prof.get("real_name") or prof.get("display_name") or me(), prof.get("email"))
+            tzname = u.get("tz")
+            if tzname:
+                SELF_TZ_CACHE = ZoneInfo(tzname)
+            else:
+                SELF_TZ_CACHE = datetime.timezone(datetime.timedelta(seconds=u.get("tz_offset", 0)))
+        except Exception:
+            SELF_TZ_CACHE = datetime.datetime.now().astimezone().tzinfo or datetime.timezone.utc
+    return SELF_TZ_CACHE
+
+
+def fmt_time(ts: str | float) -> str:
+    """Compact local time + relative age, e.g. 'Jun 11 14:32 (2h)'."""
+    dt = datetime.datetime.fromtimestamp(float(ts), self_tz())
+    stamp = dt.strftime("%b %e %H:%M").replace("  ", " ")
+    return f"{stamp} ({relative_age(ts)})"
+
+
 def truncate(s: str, n: int) -> str:
     s = re.sub(r"\s+", " ", s).strip()
     return s if len(s) <= n else s[: n - 1] + "…"
+
+
+_DUR_RE = re.compile(r"^(\d+)\s*([mhdw])$")
+_DUR_SECS = {"m": 60, "h": 3600, "d": 86400, "w": 604800}
+
+
+def parse_duration(s: str) -> int:
+    """'30m' / '12h' / '2d' / '1w' -> seconds."""
+    m = _DUR_RE.match(s.strip().lower())
+    if not m:
+        raise SystemExit(f"bad duration: {s!r} (use e.g. 30m, 12h, 2d, 1w)")
+    return int(m.group(1)) * _DUR_SECS[m.group(2)]
+
+
+def permalink(channel: str, ts: str) -> str:
+    base = workspace_url()
+    if not base or not channel:
+        return ""
+    return f"{base}archives/{channel}/p{ts.replace('.', '')}"
 
 
 def print_table(rows: list[list[str]]) -> None:
@@ -105,6 +395,77 @@ def print_table(rows: list[list[str]]) -> None:
         line = "  ".join(cell.ljust(widths[i]) for i, cell in enumerate(r) if i < cols - 1)
         last = r[-1] if r else ""
         print(f"{line}  {last}".rstrip() if line else last)
+
+
+# --- message formatter (history / thread) --------------------------------
+
+_SYSTEM_SUBTYPES = {"channel_join", "channel_leave", "channel_topic",
+                    "channel_purpose", "channel_name"}
+
+
+def is_activity(m: dict) -> bool:
+    return m.get("subtype") in _SYSTEM_SUBTYPES
+
+
+def summarize_reactions(m: dict) -> str:
+    rs = m.get("reactions") or []
+    return "  ".join(f":{r['name']}: {r['count']}" for r in rs)
+
+
+def summarize_files(m: dict) -> str:
+    fs = m.get("files") or []
+    if not fs:
+        return ""
+    names = [f.get("name") or f.get("title") or f.get("id", "file") for f in fs]
+    shown = ", ".join(names[:3]) + ("…" if len(names) > 3 else "")
+    return f"📎 {len(fs)} file(s): {shown}"
+
+
+def summarize_thread(m: dict) -> str:
+    rc = m.get("reply_count")
+    if not rc:
+        return ""
+    who = f", {m['reply_users_count']} people" if m.get("reply_users_count") else ""
+    tail = f", latest {relative_age(m['latest_reply'])} ago" if m.get("latest_reply") else ""
+    return f"↳ Thread: {rc} repl{'y' if rc == 1 else 'ies'}{who}{tail}"
+
+
+def author_label(m: dict) -> str:
+    if m.get("user"):
+        handle, real = user_name(m["user"])
+        return real if real == handle else f"{real} (@{handle})"
+    if m.get("bot_profile"):
+        return f"{m['bot_profile'].get('name', 'bot')} [bot]"
+    if m.get("username"):
+        return f"{m['username']} [bot]"
+    if m.get("bot_id"):
+        return f"{m['bot_id']} [bot]"
+    return "?"
+
+
+def format_message(m: dict, *, show_thread: bool = True,
+                   channel: str | None = None, links: bool = False) -> str:
+    head = f"[{m['ts']}] {author_label(m)} · {fmt_time(m['ts'])}"
+    subtype = m.get("subtype")
+    if subtype in _SYSTEM_SUBTYPES:
+        return head + f"  ({subtype.replace('channel_', '')})"
+    text = resolve_mentions(m.get("text", ""))
+    text = re.sub(r"[ \t]+\n", "\n", text).strip()
+    parts = [head]
+    if text:
+        parts.append(text)
+    meta = []
+    if (rx := summarize_reactions(m)):
+        meta.append(rx)
+    if (fl := summarize_files(m)):
+        meta.append(fl)
+    if show_thread and (th := summarize_thread(m)):
+        meta.append(th)
+    if meta:
+        parts.append("  ".join(meta))
+    if links and channel:
+        parts.append(f"↗ {permalink(channel, m['ts'])}")
+    return "\n".join(parts)
 
 
 # --- subcommand: mentions -----------------------------------------------
@@ -130,7 +491,7 @@ def cmd_mentions(args: argparse.Namespace) -> None:
             relative_age(m["ts"]),
             f"#{m['channel']['name']}",
             f"@{m.get('username', '?')}",
-            truncate(m.get("text", ""), 110),
+            truncate(resolve_mentions(m.get("text", "")), 110),
             m.get("permalink", ""),
         ])
     print_table(rows)
@@ -139,22 +500,13 @@ def cmd_mentions(args: argparse.Namespace) -> None:
 # --- subcommand: dms -----------------------------------------------------
 
 def cmd_dms(args: argparse.Namespace) -> None:
+    global RESOLVE
+    RESOLVE = not getattr(args, "no_resolve", False)
     types = "im,mpim" if args.group else "im"
     chans = call(
         "users.conversations",
         params={"types": types, "limit": 100, "exclude_archived": "true"},
     )["channels"]
-
-    user_cache: dict[str, str] = {}
-
-    def name_of(uid: str) -> str:
-        if uid not in user_cache:
-            try:
-                u = call("users.info", params={"user": uid})["user"]
-                user_cache[uid] = u.get("profile", {}).get("real_name") or u.get("name") or uid
-            except SystemExit:
-                user_cache[uid] = uid
-        return user_cache[uid]
 
     rows_raw: list[dict[str, Any]] = []
     for c in chans:
@@ -165,7 +517,7 @@ def cmd_dms(args: argparse.Namespace) -> None:
         m = msgs[0]
         ts = float(m["ts"])
         if c.get("is_im"):
-            peer = name_of(c["user"])
+            peer = user_name(c["user"])[1]
         else:
             peer = c.get("name") or "(group)"
         from_id = m.get("user") or m.get("bot_id") or "?"
@@ -194,28 +546,67 @@ def cmd_dms(args: argparse.Namespace) -> None:
             relative_age(r["ts"]),
             r["peer"],
             f"({r['dir']})",
-            truncate(r["text"], 110),
+            truncate(resolve_mentions(r["text"]), 110),
         ])
     print_table(rows)
+
+
+# --- subcommand: history -------------------------------------------------
+
+def cmd_history(args: argparse.Namespace) -> None:
+    global RESOLVE
+    RESOLVE = not args.no_resolve
+    if args.warm and RESOLVE:
+        warm_users()
+    channel = resolve_channel(args.channel)
+    limit = args.n
+    params: dict[str, Any] = {"channel": channel, "limit": limit}
+    if args.since:
+        params["oldest"] = f"{time.time() - parse_duration(args.since):.6f}"
+        params["limit"] = max(limit, 200)
+    if args.cursor:
+        params["cursor"] = args.cursor
+    data = call("conversations.history", params=params)
+    if args.json:
+        print(json.dumps(data, indent=2))
+        return
+    header = f"#{channel_name(channel)}" if RESOLVE else channel
+    print(f"# {header}\n")
+    for m in data.get("messages", []):
+        if is_activity(m) and not args.activity:
+            continue
+        print(format_message(m, show_thread=True, channel=channel, links=args.links))
+        print()
+    cur = data.get("response_metadata", {}).get("next_cursor")
+    if data.get("has_more") and cur:
+        print(f"next: --cursor {cur}")
 
 
 # --- subcommand: thread --------------------------------------------------
 
 def cmd_thread(args: argparse.Namespace) -> None:
-    data = call(
-        "conversations.replies",
-        params={"channel": args.channel, "ts": args.ts},
-    )
+    global RESOLVE
+    RESOLVE = not args.no_resolve
+    if args.warm and RESOLVE:
+        warm_users()
+    channel = resolve_channel(args.channel)
+    params: dict[str, Any] = {"channel": channel, "ts": args.ts, "limit": args.n}
+    if args.since:
+        params["oldest"] = f"{time.time() - parse_duration(args.since):.6f}"
+    if args.cursor:
+        params["cursor"] = args.cursor
+    data = call("conversations.replies", params=params)
     if args.json:
         print(json.dumps(data, indent=2))
         return
     for m in data.get("messages", []):
-        author = m.get("user") or m.get("bot_id") or "?"
-        ts = m["ts"]
-        text = re.sub(r"\s+\n", "\n", m.get("text", ""))
-        print(f"--- [{ts}] @{author} ({relative_age(ts)})")
-        print(text)
+        if is_activity(m) and not args.activity:
+            continue
+        print(format_message(m, show_thread=False, channel=channel, links=args.links))
         print()
+    cur = data.get("response_metadata", {}).get("next_cursor")
+    if data.get("has_more") and cur:
+        print(f"next: --cursor {cur}")
 
 
 # --- subcommand: reply / send -------------------------------------------
@@ -236,7 +627,7 @@ def resolve_text(args: argparse.Namespace) -> str:
 
 
 def cmd_send(args: argparse.Namespace) -> None:
-    body: dict[str, Any] = {"channel": args.channel, "text": resolve_text(args)}
+    body: dict[str, Any] = {"channel": resolve_channel(args.channel), "text": resolve_text(args)}
     if getattr(args, "thread_ts", None):
         body["thread_ts"] = args.thread_ts
     data = call("chat.postMessage", json_body=body)
@@ -268,10 +659,68 @@ def cmd_search(args: argparse.Namespace) -> None:
             relative_age(m["ts"]),
             f"#{m['channel']['name']}",
             f"@{m.get('username', '?')}",
-            truncate(m.get("text", ""), 110),
+            truncate(resolve_mentions(m.get("text", "")), 110),
             m.get("permalink", ""),
         ])
     print_table(rows)
+
+
+# --- subcommand: channels ------------------------------------------------
+
+def cmd_channels(args: argparse.Namespace) -> None:
+    chans = list_channels(args.types)  # also warms the persistent name->id cache
+    if args.json:
+        print(json.dumps(chans, indent=2))
+        return
+    if args.sort == "popularity":
+        chans.sort(key=lambda c: c.get("num_members", 0), reverse=True)
+    else:
+        chans.sort(key=lambda c: c.get("name") or "")
+    rows = []
+    for i, c in enumerate(chans[: args.n], 1):
+        rows.append([
+            f"[{i}]",
+            f"#{c.get('name') or c['id']}",
+            c["id"],
+            str(c.get("num_members", 0)),
+            truncate(html.unescape((c.get("purpose") or {}).get("value", "")), 60),
+        ])
+    print_table(rows)
+
+
+# --- subcommand: users ---------------------------------------------------
+
+def cmd_users(args: argparse.Namespace) -> None:
+    ensure_users_loaded()
+    q = args.query.lower()
+    hits = [
+        (uid, handle, real, USER_EMAIL.get(uid, ""))
+        for uid, (handle, real) in USER_CACHE.items()
+        if not (handle == uid and real == uid)
+        and (q in handle.lower() or q in real.lower() or q in USER_EMAIL.get(uid, "").lower())
+    ]
+    hits.sort(key=lambda x: x[2].lower())
+    if args.json:
+        print(json.dumps(
+            [{"user_id": u, "handle": h, "real_name": r, "email": e} for u, h, r, e in hits], indent=2))
+        return
+    rows = [[f"[{i}]", r, f"@{h}", u, e] for i, (u, h, r, e) in enumerate(hits[: args.n], 1)]
+    print_table(rows)
+
+
+# --- subcommand: react ---------------------------------------------------
+
+def cmd_react(args: argparse.Namespace) -> None:
+    method = "reactions.remove" if args.remove else "reactions.add"
+    data = call(method, json_body={
+        "channel": resolve_channel(args.channel),
+        "timestamp": args.ts,
+        "name": args.emoji.strip(":"),
+    })
+    if args.json:
+        print(json.dumps(data, indent=2))
+    else:
+        print(f"{'removed' if args.remove else 'added'} :{args.emoji.strip(':')}:")
 
 
 # --- subcommand: raw -----------------------------------------------------
@@ -347,11 +796,30 @@ def main() -> None:
     pd = sub.add_parser("dms", parents=[common], help="recent DMs")
     pd.add_argument("-n", type=int, default=15)
     pd.add_argument("--group", action="store_true", help="include group DMs (mpim)")
+    pd.add_argument("--no-resolve", action="store_true", help="skip user-name lookups (fast, raw ids)")
     pd.set_defaults(func=cmd_dms)
 
+    ph = sub.add_parser("history", parents=[common], help="formatted channel timeline (newest first)")
+    ph.add_argument("channel", help="C…/D…/G… id, or #name / @user (resolved via cache)")
+    ph.add_argument("-n", type=int, default=30)
+    ph.add_argument("--since", default=None, metavar="DUR", help="only messages newer than DUR (30m/12h/2d/1w)")
+    ph.add_argument("--cursor", default=None, help="next_cursor from a prior page")
+    ph.add_argument("--links", action="store_true", help="append a permalink line per message")
+    ph.add_argument("--activity", action="store_true", help="include join/leave/topic system messages")
+    ph.add_argument("--no-resolve", action="store_true", help="skip name lookups in output (fast, raw ids)")
+    ph.add_argument("--warm", action="store_true", help="bulk-prefetch users.list before resolving (busy channels)")
+    ph.set_defaults(func=cmd_history)
+
     pt = sub.add_parser("thread", parents=[common], help="print a thread")
-    pt.add_argument("channel")
+    pt.add_argument("channel", help="C…/D…/G… id, or #name / @user (resolved via cache)")
     pt.add_argument("ts")
+    pt.add_argument("-n", type=int, default=50)
+    pt.add_argument("--since", default=None, metavar="DUR", help="only replies newer than DUR (30m/12h/2d/1w)")
+    pt.add_argument("--cursor", default=None, help="next_cursor from a prior page")
+    pt.add_argument("--links", action="store_true", help="append a permalink line per message")
+    pt.add_argument("--activity", action="store_true", help="include join/leave/topic system messages")
+    pt.add_argument("--no-resolve", action="store_true", help="skip name lookups in output (fast, raw ids)")
+    pt.add_argument("--warm", action="store_true", help="bulk-prefetch users.list before resolving (busy threads)")
     pt.set_defaults(func=cmd_thread)
 
     pr = sub.add_parser("reply", parents=[common], help="reply in a thread")
@@ -372,6 +840,25 @@ def main() -> None:
     pq.add_argument("-n", type=int, default=20)
     pq.set_defaults(func=cmd_search)
 
+    pc = sub.add_parser("channels", parents=[common], help="list channels (warms #name->id cache)")
+    pc.add_argument("--types", default="public_channel,private_channel",
+                    help="comma list: public_channel,private_channel,mpim,im")
+    pc.add_argument("--sort", choices=["name", "popularity"], default="name")
+    pc.add_argument("-n", type=int, default=100)
+    pc.set_defaults(func=cmd_channels)
+
+    pu = sub.add_parser("users", parents=[common], help="find users by name/handle/email (over cache)")
+    pu.add_argument("query")
+    pu.add_argument("-n", type=int, default=20)
+    pu.set_defaults(func=cmd_users)
+
+    prx = sub.add_parser("react", parents=[common], help="add/remove an emoji reaction")
+    prx.add_argument("channel", help="C…/D…/G… id, or #name / @user")
+    prx.add_argument("ts")
+    prx.add_argument("emoji", help="emoji name, with or without colons (e.g. thumbsup)")
+    prx.add_argument("--remove", action="store_true", help="remove instead of add")
+    prx.set_defaults(func=cmd_react)
+
     pr2 = sub.add_parser("raw", parents=[common], help="raw API call: slack raw <method> k=v ...")
     pr2.add_argument("method")
     pr2.add_argument("kv", nargs="*", default=[])
@@ -387,6 +874,8 @@ def main() -> None:
     pw.set_defaults(func=cmd_whoami)
 
     args = p.parse_args()
+    load_caches()
+    atexit.register(save_caches)
     args.func(args)
 
 
