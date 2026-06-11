@@ -611,6 +611,38 @@ def cmd_thread(args: argparse.Namespace) -> None:
 
 # --- subcommand: reply / send -------------------------------------------
 
+def markdown_to_mrkdwn(text: str) -> str:
+    """Convert common Markdown to Slack mrkdwn.
+
+    Slack does NOT use CommonMark: bold is *one* star (not `**`), italic is
+    `_underscore_`, links are `<url|label>`, no headings. Agents write Markdown,
+    so `**bold**` would otherwise render with literal asterisks. Code spans are
+    protected; pass --raw to skip this and send verbatim Slack mrkdwn.
+    """
+    if not text:
+        return text
+    blocks: list[str] = []
+
+    def stash(m: re.Match[str]) -> str:
+        blocks.append(m.group(0))
+        return f"\x00{len(blocks) - 1}\x00"
+
+    text = re.sub(r"```.*?```", stash, text, flags=re.DOTALL)   # fenced code
+    text = re.sub(r"`[^`\n]+`", stash, text)                    # inline code
+    text = re.sub(r"\[([^\]]+)\]\((\S+?)\)", r"<\2|\1>", text)  # [label](url) -> <url|label>
+    BOLD, ITAL = "\x01", "\x02"
+    text = re.sub(r"(?m)^#{1,6}[ \t]+(.+?)[ \t]*#*$",
+                  lambda m: f"{BOLD}{m.group(1)}{BOLD}", text)   # heading -> bold line
+    text = re.sub(r"\*\*(.+?)\*\*", lambda m: f"{BOLD}{m.group(1)}{BOLD}", text, flags=re.DOTALL)
+    text = re.sub(r"__(.+?)__", lambda m: f"{BOLD}{m.group(1)}{BOLD}", text, flags=re.DOTALL)
+    text = re.sub(r"(?<![\w*])\*(?!\s)(.+?)(?<!\s)\*(?![\w*])",
+                  lambda m: f"{ITAL}{m.group(1)}{ITAL}", text)   # *italic* -> _italic_
+    text = re.sub(r"~~(.+?)~~", r"~\1~", text, flags=re.DOTALL)  # ~~strike~~ -> ~strike~
+    text = text.replace(BOLD, "*").replace(ITAL, "_")
+    text = re.sub(r"\x00(\d+)\x00", lambda m: blocks[int(m.group(1))], text)
+    return text
+
+
 def resolve_text(args: argparse.Namespace) -> str:
     """Message body from --text-file (path, or '-' for stdin) or the positional arg.
 
@@ -627,7 +659,10 @@ def resolve_text(args: argparse.Namespace) -> str:
 
 
 def cmd_send(args: argparse.Namespace) -> None:
-    body: dict[str, Any] = {"channel": resolve_channel(args.channel), "text": resolve_text(args)}
+    text = resolve_text(args)
+    if not getattr(args, "raw", False):
+        text = markdown_to_mrkdwn(text)
+    body: dict[str, Any] = {"channel": resolve_channel(args.channel), "text": text}
     if getattr(args, "thread_ts", None):
         body["thread_ts"] = args.thread_ts
     data = call("chat.postMessage", json_body=body)
@@ -827,12 +862,14 @@ def main() -> None:
     pr.add_argument("thread_ts")
     pr.add_argument("text", nargs="?", help="inline body; omit when using --text-file")
     pr.add_argument("--text-file", metavar="PATH", help="read body from file (or '-' for stdin); preferred for multi-line/backtick text")
+    pr.add_argument("--raw", action="store_true", help="send verbatim (skip Markdown→Slack mrkdwn conversion)")
     pr.set_defaults(func=cmd_send)
 
     ps = sub.add_parser("send", parents=[common], help="send a top-level message")
     ps.add_argument("channel")
     ps.add_argument("text", nargs="?", help="inline body; omit when using --text-file")
     ps.add_argument("--text-file", metavar="PATH", help="read body from file (or '-' for stdin); preferred for multi-line/backtick text")
+    ps.add_argument("--raw", action="store_true", help="send verbatim (skip Markdown→Slack mrkdwn conversion)")
     ps.set_defaults(func=cmd_send)
 
     pq = sub.add_parser("search", parents=[common], help="search messages (slack query syntax)")

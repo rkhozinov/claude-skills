@@ -36,9 +36,10 @@ slack mentions [-n 20]                        # @mentions of self, newest first
 slack dms      [-n 15] [--group] [--no-resolve]            # latest msg per 1:1 DM (--group adds mpim)
 slack history  <channel> [-n 30] [--since 2d] [--cursor X] [--links] [--activity] [--no-resolve] [--warm]  # channel timeline, newest first
 slack thread   <channel> <thread-ts> [-n 50] [--since 2d] [--cursor X] [--links] [--activity] [--no-resolve] [--warm]  # thread, oldest first
-slack reply    <channel> <thread-ts> [txt]    # post reply in thread
-slack send     <channel> [txt]                # post top-level message
-#   send/reply also take --text-file <path|->  (body from file or stdin; preferred — see below)
+slack reply    <channel> <thread-ts> [txt] [--raw]   # post reply in thread
+slack send     <channel> [txt] [--raw]               # post top-level message
+#   send/reply take Markdown (auto-converted to Slack mrkdwn; --raw to skip) and
+#   --text-file <path|->  (body from file or stdin; preferred — see below)
 slack search   '<query>' [-n 20]              # slack-search-bar syntax
 slack channels [--types …] [--sort name|popularity] [-n 100]   # list channels; warms the #name→id cache
 slack users    '<query>' [-n 20]              # find users by name/handle/email (over the cache)
@@ -73,6 +74,21 @@ Output format:
   - `--no-resolve` skips all name lookups (raw `U…`/`#C…`, no `users.info`/`conversations.info` calls) — use for big/fast pulls or after hitting a rate cap.
   - `--warm` bulk-prefetches `users.list` once before resolving — cheaper than N per-user lookups on a busy channel.
 - **`--json`** (every command) — raw Slack response, unchanged, suitable for `| jq`. `dms --json` rows carry `channel_id` (`D…`) + `user_id` (peer's `U…`, null for group) — so you can reply to a DM straight from the listing without a second lookup.
+
+### Markdown is auto-converted to Slack mrkdwn
+
+`send`/`reply` take **Markdown** and convert it to Slack's mrkdwn before posting, because Slack does **not** use CommonMark — bold is one `*star*` (not `**`), italic is `_underscore_`, links are `<url|label>`, and there are no headings. Without conversion, `**bold**` renders with literal asterisks (the classic bug). Conversions:
+
+| You write (Markdown) | Sent to Slack |
+|---|---|
+| `**bold**`, `__bold__` | `*bold*` |
+| `*italic*` | `_italic_` |
+| `[label](url)` | `<url\|label>` |
+| `# Heading` | `*Heading*` (bold line) |
+| `~~strike~~` | `~strike~` |
+| `` `code` ``, ```` ```fenced``` ```` | preserved as-is (not touched) |
+
+Code spans/fences are protected, so `**` inside them survives. Pass **`--raw`** to skip conversion and send verbatim Slack mrkdwn (use it when you're hand-writing `*slack bold*` / `<url|label>` yourself).
 
 ### Sending text: prefer `--text-file`
 
