@@ -24,9 +24,9 @@ security add-generic-password -a "$USER" -s slack-xoxp -w 'xoxp-…' -U
 
 ## Granted user scopes
 
-`search:read`, `channels:history`, `groups:history`, `im:history`, `mpim:history`, `channels:read`, `groups:read`, `chat:write`, `users:read`, `users:read.email`, `files:read`.
+`search:read`, `channels:history`, `groups:history`, `im:history`, `mpim:history`, `channels:read`, `groups:read`, `chat:write`, `reactions:write`, `users:read`, `users:read.email`, `files:read`.
 
-If a method returns `missing_scope`, add the scope at https://api.slack.com/apps/<APP_ID>/oauth and reinstall. Notably `react` needs `reactions:write` (not granted by default), and `channels` needs `channels:read`/`groups:read`.
+If a method returns `missing_scope`, add the scope under **User Token Scopes** at https://api.slack.com/apps/<APP_ID>/oauth, then reinstall (token rotation is off, so the xoxp string stays the same — no keychain update needed). `react` (`reactions:write`) and `channels` (`channels:read`/`groups:read`) are already granted.
 
 ## Usage
 
