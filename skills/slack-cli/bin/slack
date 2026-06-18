@@ -611,13 +611,44 @@ def cmd_thread(args: argparse.Namespace) -> None:
 
 # --- subcommand: reply / send -------------------------------------------
 
+# CommonMark markers that Slack renders literally (it uses mrkdwn, not CommonMark).
+# Used to (a) drive the markdown_to_mrkdwn conversion and (b) guard the raw escape
+# hatch — see looks_like_markdown / cmd_raw.
+_MD_LINK = re.compile(r"\[([^\]]+)\]\(\s*<?([^()\s<>]+(?:\([^()\s<>]*\)[^()\s<>]*)*)>?\s*\)")
+
+
+def looks_like_markdown(text: str) -> list[str]:
+    """Return the CommonMark markers found in `text` that Slack would render
+    literally (`**bold**`, `__bold__`, `[label](url)`, `# heading`). Code spans
+    and fences are stripped first so code samples don't trip it. Empty list ⇒ safe
+    to send verbatim. Drives the `slack raw chat.*` guardrail and the `--raw` warning.
+    """
+    if not text:
+        return []
+    probe = re.sub(r"```.*?```", "", text, flags=re.DOTALL)
+    probe = re.sub(r"`[^`\n]+`", "", probe)
+    found: list[str] = []
+    if re.search(r"\*\*.+?\*\*", probe, flags=re.DOTALL):
+        found.append("**bold**")
+    if re.search(r"(?<!\w)__.+?__(?!\w)", probe, flags=re.DOTALL):
+        found.append("__bold__")
+    if _MD_LINK.search(probe):
+        found.append("[label](url)")
+    if re.search(r"(?m)^[ \t]*#{1,6}[ \t]+\S", probe):
+        found.append("# heading")
+    return found
+
+
 def markdown_to_mrkdwn(text: str) -> str:
     """Convert common Markdown to Slack mrkdwn.
 
     Slack does NOT use CommonMark: bold is *one* star (not `**`), italic is
     `_underscore_`, links are `<url|label>`, no headings. Agents write Markdown,
-    so `**bold**` would otherwise render with literal asterisks. Code spans are
-    protected; pass --raw to skip this and send verbatim Slack mrkdwn.
+    so `**bold**` would otherwise render with literal asterisks. Code spans and
+    link URLs are protected; pass --raw to skip this and send verbatim Slack mrkdwn.
+
+    NOT idempotent — re-running over mrkdwn corrupts it (`*bold*` -> `_bold_`).
+    Convert once, on the way out (cmd_send), never re-feed mrkdwn through it.
     """
     if not text:
         return text
@@ -627,12 +658,27 @@ def markdown_to_mrkdwn(text: str) -> str:
         blocks.append(m.group(0))
         return f"\x00{len(blocks) - 1}\x00"
 
+    def stash_str(s: str) -> str:
+        blocks.append(s)
+        return f"\x00{len(blocks) - 1}\x00"
+
+    def link(m: re.Match[str]) -> str:
+        # [label](url) -> <url|label>. The URL is stashed (so a later bold/italic
+        # pass can't touch a `*`/`_` inside it) and any literal `|` is percent-
+        # encoded, since Slack splits <url|label> at the FIRST pipe. The label is
+        # left live so markdown inside it still converts.
+        url = m.group(2).replace("|", "%7C")
+        return f"<{stash_str(url)}|{m.group(1)}>"
+
     text = re.sub(r"```.*?```", stash, text, flags=re.DOTALL)   # fenced code
     text = re.sub(r"`[^`\n]+`", stash, text)                    # inline code
-    text = re.sub(r"\[([^\]]+)\]\((\S+?)\)", r"<\2|\1>", text)  # [label](url) -> <url|label>
+    text = _MD_LINK.sub(link, text)                             # [label](url) -> <url|label>
     BOLD, ITAL = "\x01", "\x02"
     text = re.sub(r"(?m)^#{1,6}[ \t]+(.+?)[ \t]*#*$",
                   lambda m: f"{BOLD}{m.group(1)}{BOLD}", text)   # heading -> bold line
+    text = re.sub(r"(?m)^([ \t]*)[-+][ \t]+", r"\1• ", text)    # - / + bullets -> •
+    text = re.sub(r"\*\*\*(.+?)\*\*\*",
+                  lambda m: f"{BOLD}{ITAL}{m.group(1)}{ITAL}{BOLD}", text, flags=re.DOTALL)
     text = re.sub(r"\*\*(.+?)\*\*", lambda m: f"{BOLD}{m.group(1)}{BOLD}", text, flags=re.DOTALL)
     text = re.sub(r"__(.+?)__", lambda m: f"{BOLD}{m.group(1)}{BOLD}", text, flags=re.DOTALL)
     text = re.sub(r"(?<![\w*])\*(?!\s)(.+?)(?<!\s)\*(?![\w*])",
@@ -643,28 +689,58 @@ def markdown_to_mrkdwn(text: str) -> str:
     return text
 
 
-def resolve_text(args: argparse.Namespace) -> str:
+def resolve_text(args: argparse.Namespace, required: bool = True) -> str:
     """Message body from --text-file (path, or '-' for stdin) or the positional arg.
 
     Prefer --text-file for any message with backticks, quotes, newlines, or
     shell metacharacters — it sidesteps shell quoting entirely (same reason
-    `gh ... --body-file` is mandated over inline --body)."""
+    `gh ... --body-file` is mandated over inline --body).
+
+    `required=False` (used with --blocks-file, where text is just the notification
+    fallback) returns "" instead of erroring when no text was supplied."""
     src = getattr(args, "text_file", None)
     if src:
         data = sys.stdin.read() if src == "-" else open(src, encoding="utf-8").read()
         return data.rstrip("\n")
     if args.text is not None:
         return args.text
+    if not required:
+        return ""
     raise SystemExit("no message text: pass a positional <text> or --text-file <path|->")
 
 
 def cmd_send(args: argparse.Namespace) -> None:
-    text = resolve_text(args)
-    if not getattr(args, "raw", False):
+    blocks_file = getattr(args, "blocks_file", None)
+    text = resolve_text(args, required=not blocks_file)
+    if getattr(args, "raw", False):
+        # Explicit verbatim opt-out — don't convert, but warn if the text still
+        # carries CommonMark that Slack will render literally (the classic ** bug).
+        md = looks_like_markdown(text)
+        if md:
+            print(f"warning: --raw sends verbatim; text contains Markdown "
+                  f"({', '.join(md)}) that Slack will render literally. "
+                  f"Drop --raw to auto-convert.", file=sys.stderr)
+    else:
         text = markdown_to_mrkdwn(text)
     body: dict[str, Any] = {"channel": resolve_channel(args.channel), "text": text}
     if getattr(args, "thread_ts", None):
         body["thread_ts"] = args.thread_ts
+    if blocks_file:
+        raw = sys.stdin.read() if blocks_file == "-" else open(blocks_file, encoding="utf-8").read()
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError as e:
+            raise SystemExit(f"--blocks-file: invalid JSON: {e}")
+        # accept either a bare blocks array or a {"blocks": [...]} wrapper
+        blocks = parsed.get("blocks", parsed) if isinstance(parsed, dict) else parsed
+        if not isinstance(blocks, list):
+            raise SystemExit("--blocks-file: expected a JSON array of Block Kit blocks "
+                             "(or an object with a \"blocks\" array)")
+        body["blocks"] = blocks
+    unfurl = getattr(args, "unfurl", None)
+    if unfurl is not None:
+        body["unfurl_links"] = unfurl
+        body["unfurl_media"] = unfurl
     data = call("chat.postMessage", json_body=body)
     if args.json:
         print(json.dumps(data, indent=2))
@@ -760,6 +836,13 @@ def cmd_react(args: argparse.Namespace) -> None:
 
 # --- subcommand: raw -----------------------------------------------------
 
+# Posting methods whose `text` Slack renders as mrkdwn — guarded against
+# accidentally shipping un-converted CommonMark through the raw escape hatch.
+_RAW_POST_METHODS = {
+    "chat.postMessage", "chat.update", "chat.postEphemeral", "chat.scheduleMessage",
+}
+
+
 def cmd_raw(args: argparse.Namespace) -> None:
     """Generic escape hatch: `slack raw <method> k=v k=v ...` (GET) or `--post` (JSON body)."""
     payload = {}
@@ -768,6 +851,14 @@ def cmd_raw(args: argparse.Namespace) -> None:
             raise SystemExit(f"bad k=v pair: {kv}")
         k, v = kv.split("=", 1)
         payload[k] = v
+    if args.method in _RAW_POST_METHODS and not getattr(args, "force", False):
+        md = looks_like_markdown(payload.get("text", ""))
+        if md:
+            raise SystemExit(
+                f"refusing {args.method}: text contains CommonMark ({', '.join(md)}) "
+                f"that Slack renders literally (the classic ** bug).\n"
+                f"Use `slack send`/`slack reply` — they auto-convert Markdown→mrkdwn.\n"
+                f"To send verbatim anyway, re-run with --force.")
     data = (
         call(args.method, json_body=payload)
         if args.post
@@ -863,6 +954,10 @@ def main() -> None:
     pr.add_argument("text", nargs="?", help="inline body; omit when using --text-file")
     pr.add_argument("--text-file", metavar="PATH", help="read body from file (or '-' for stdin); preferred for multi-line/backtick text")
     pr.add_argument("--raw", action="store_true", help="send verbatim (skip Markdown→Slack mrkdwn conversion)")
+    pr.add_argument("--blocks-file", metavar="PATH", help="JSON Block Kit array (file or '-'); text becomes the notification fallback")
+    pr_unfurl = pr.add_mutually_exclusive_group()
+    pr_unfurl.add_argument("--unfurl", dest="unfurl", action="store_true", default=None, help="force link/media unfurling")
+    pr_unfurl.add_argument("--no-unfurl", dest="unfurl", action="store_false", help="suppress link/media unfurling")
     pr.set_defaults(func=cmd_send)
 
     ps = sub.add_parser("send", parents=[common], help="send a top-level message")
@@ -870,6 +965,10 @@ def main() -> None:
     ps.add_argument("text", nargs="?", help="inline body; omit when using --text-file")
     ps.add_argument("--text-file", metavar="PATH", help="read body from file (or '-' for stdin); preferred for multi-line/backtick text")
     ps.add_argument("--raw", action="store_true", help="send verbatim (skip Markdown→Slack mrkdwn conversion)")
+    ps.add_argument("--blocks-file", metavar="PATH", help="JSON Block Kit array (file or '-'); text becomes the notification fallback")
+    ps_unfurl = ps.add_mutually_exclusive_group()
+    ps_unfurl.add_argument("--unfurl", dest="unfurl", action="store_true", default=None, help="force link/media unfurling")
+    ps_unfurl.add_argument("--no-unfurl", dest="unfurl", action="store_false", help="suppress link/media unfurling")
     ps.set_defaults(func=cmd_send)
 
     pq = sub.add_parser("search", parents=[common], help="search messages (slack query syntax)")
@@ -900,6 +999,7 @@ def main() -> None:
     pr2.add_argument("method")
     pr2.add_argument("kv", nargs="*", default=[])
     pr2.add_argument("--post", action="store_true", help="POST as JSON body instead of GET")
+    pr2.add_argument("--force", action="store_true", help="bypass the Markdown guardrail on chat.* posting methods")
     pr2.set_defaults(func=cmd_raw)
 
     pf = sub.add_parser("file", parents=[common], help="download a file by id")

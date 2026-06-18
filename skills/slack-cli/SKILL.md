@@ -38,14 +38,16 @@ slack history  <channel> [-n 30] [--since 2d] [--cursor X] [--links] [--activity
 slack thread   <channel> <thread-ts> [-n 50] [--since 2d] [--cursor X] [--links] [--activity] [--no-resolve] [--warm]  # thread, oldest first
 slack reply    <channel> <thread-ts> [txt] [--raw]   # post reply in thread
 slack send     <channel> [txt] [--raw]               # post top-level message
-#   send/reply take Markdown (auto-converted to Slack mrkdwn; --raw to skip) and
-#   --text-file <path|->  (body from file or stdin; preferred — see below)
+#   send/reply take Markdown (auto-converted to Slack mrkdwn; --raw to skip),
+#   --text-file <path|->  (body from file or stdin; preferred — see below),
+#   --blocks-file <path|->  (Block Kit JSON; text = notification fallback),
+#   --unfurl / --no-unfurl  (force/suppress link unfurling)
 slack search   '<query>' [-n 20]              # slack-search-bar syntax
 slack channels [--types …] [--sort name|popularity] [-n 100]   # list channels; warms the #name→id cache
 slack users    '<query>' [-n 20]              # find users by name/handle/email (over the cache)
 slack react    <channel> <ts> <emoji> [--remove]   # add/remove a reaction (needs reactions:write)
 slack file     <file-id> [-o <path>]          # download a file by id (default: ./<name>; -o - for stdout)
-slack raw      <method> [k=v …] [--post]      # escape hatch: any Web API method
+slack raw      <method> [k=v …] [--post] [--force]   # escape hatch: any Web API method (--force: skip mrkdwn guardrail)
 slack <cmd> --json                            # raw API JSON instead of formatted output
 ```
 
@@ -83,12 +85,18 @@ Output format:
 |---|---|
 | `**bold**`, `__bold__` | `*bold*` |
 | `*italic*` | `_italic_` |
-| `[label](url)` | `<url\|label>` |
+| `***bolditalic***` | `*_bolditalic_*` |
+| `[label](url)` | `<url\|label>` (any `\|` in the URL is %7C-encoded so the link doesn't split; `)` inside the URL is kept) |
 | `# Heading` | `*Heading*` (bold line) |
+| `- item`, `+ item` | `• item` |
 | `~~strike~~` | `~strike~` |
 | `` `code` ``, ```` ```fenced``` ```` | preserved as-is (not touched) |
 
-Code spans/fences are protected, so `**` inside them survives. Pass **`--raw`** to skip conversion and send verbatim Slack mrkdwn (use it when you're hand-writing `*slack bold*` / `<url|label>` yourself).
+Code spans/fences and link URLs are protected, so `**`/`_` inside them survive. Pass **`--raw`** to skip conversion and send verbatim Slack mrkdwn (use it when you're hand-writing `*slack bold*` / `<url|label>` yourself).
+
+> **Posting = `send`/`reply`, never `slack raw` or `--raw` for agent-written Markdown.** The converter only runs on `send`/`reply` *without* `--raw`. If you post CommonMark (`**bold**`, `[label](url)`) through the `slack raw chat.postMessage` escape hatch or with `--raw`, it ships verbatim and Slack renders the literal `**`/`[]()` — this is the exact bug to avoid. To make this hard to do by accident, `slack raw chat.{postMessage,update,postEphemeral,scheduleMessage}` **refuses** a `text=` containing CommonMark unless you pass `--force`, and `send/reply --raw` prints a warning. For rich messages, use `--blocks-file` on `send`/`reply` (text still converts) rather than dropping to raw.
+>
+> The converter is **not idempotent** — running it over already-converted mrkdwn corrupts it (`*bold*` → `_bold_`). Convert once, on the way out. That's why raw never auto-converts.
 
 ### Sending text: prefer `--text-file`
 
@@ -100,6 +108,10 @@ slack send D0AGABWHTSA --text-file /tmp/msg.md
 slack reply C0… 1778164397.756779 --text-file -   <<'EOF'
 done — see `Program.cs:477`. shipped in #709.
 EOF
+
+# rich message via Block Kit — text is the notification fallback, blocks are the body.
+# Use this instead of dropping to `slack raw chat.postMessage` (which won't convert text).
+slack send "#engineering" "Deploy summary" --blocks-file /tmp/blocks.json --no-unfurl
 ```
 
 ## Common patterns
@@ -167,6 +179,8 @@ slack raw <method> key=val --post             # POST as JSON body
 ```
 
 This is a thin shim over `requests.get/post` — same auth, same `.ok` enforcement, just no formatting. Pipe through `jq`.
+
+**Do not use `raw` to post messages.** `raw chat.{postMessage,update,postEphemeral,scheduleMessage}` does **not** convert Markdown, so it ships literal `**`/`[]()`. As a guard it refuses a `text=` containing CommonMark unless you add `--force`. Use `slack send`/`slack reply` (which convert, and take `--blocks-file` for Block Kit) instead.
 
 ## Re-enabling the MCP plugin
 
