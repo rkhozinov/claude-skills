@@ -1,6 +1,6 @@
 {
   "name": "claude-skills",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Personal grab-bag of Claude Code skills: gh, grafana, slack-cli, linear-cli, issue, things3, archive-sessions, claude-diff, skill-creator, awk-sed.",
   "author": {
     "name": "Ruslan Khozinov",

@@ -689,6 +689,49 @@ def markdown_to_mrkdwn(text: str) -> str:
     return text
 
 
+# Special broadcast mentions: @here/@channel/@everyone -> <!here> etc.
+_BROADCAST = {"here": "<!here>", "channel": "<!channel>", "everyone": "<!everyone>"}
+# Match @handle or @"Full Name" only when @ starts a word (not mid-email like a@b.com).
+_OUT_MENTION = re.compile(r'(?<![\w@./])@(?:"([^"\n]+)"|([A-Za-z0-9][A-Za-z0-9._-]*))')
+
+
+def resolve_outbound_mentions(text: str) -> str:
+    """`@handle` / `@"Full Name"` -> `<@Uid>` so the mention actually pings.
+
+    EXACT match only (handle or full real-name, case-insensitive) against the
+    user cache — `@here/@channel/@everyone` become broadcast entities. An
+    ambiguous or unknown token (e.g. `@Taylor` when 7 people match) is left as
+    literal text with a stderr warning: a non-ping is better than a mis-ping.
+    Code spans/fences are protected so `@x` inside them never resolves.
+    """
+    if not text or not RESOLVE:
+        return text
+    blocks: list[str] = []
+
+    def stash(m: re.Match[str]) -> str:
+        blocks.append(m.group(0))
+        return f"\x00{len(blocks) - 1}\x00"
+
+    tmp = re.sub(r"```.*?```", stash, text, flags=re.DOTALL)  # fenced code
+    tmp = re.sub(r"`[^`\n]+`", stash, tmp)                    # inline code
+    ensure_users_loaded()
+
+    def repl(m: re.Match[str]) -> str:
+        name = m.group(1) or m.group(2)
+        if name.lower() in _BROADCAST:
+            return _BROADCAST[name.lower()]
+        uid = USER_BY_NAME.get(name.lower())
+        if uid:
+            return f"<@{uid}>"
+        print(f"warning: @{name} did not resolve to a unique user — left as text, "
+              f"no ping. Use the exact handle (`slack users {name}`) or <@ID>.",
+              file=sys.stderr)
+        return m.group(0)
+
+    tmp = _OUT_MENTION.sub(repl, tmp)
+    return re.sub(r"\x00(\d+)\x00", lambda m: blocks[int(m.group(1))], tmp)
+
+
 def resolve_text(args: argparse.Namespace, required: bool = True) -> str:
     """Message body from --text-file (path, or '-' for stdin) or the positional arg.
 
@@ -712,6 +755,7 @@ def resolve_text(args: argparse.Namespace, required: bool = True) -> str:
 def cmd_send(args: argparse.Namespace) -> None:
     blocks_file = getattr(args, "blocks_file", None)
     text = resolve_text(args, required=not blocks_file)
+    text = resolve_outbound_mentions(text)  # @handle -> <@id> ping (resolution, not formatting — runs even with --raw)
     if getattr(args, "raw", False):
         # Explicit verbatim opt-out — don't convert, but warn if the text still
         # carries CommonMark that Slack will render literally (the classic ** bug).

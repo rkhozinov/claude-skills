@@ -98,6 +98,17 @@ Code spans/fences and link URLs are protected, so `**`/`_` inside them survive. 
 >
 > The converter is **not idempotent** — running it over already-converted mrkdwn corrupts it (`*bold*` → `_bold_`). Convert once, on the way out. That's why raw never auto-converts.
 
+### Mentions that actually ping
+
+`send`/`reply` resolve `@handle` in the body to a real Slack mention (`<@Uid>`) so the person gets pinged — runs even with `--raw` (it's resolution, not formatting). Rules:
+
+- **Exact match only** — `@<handle>` (handle) or `@"Sam <surname>"` (quoted full name). Matched case-insensitively against the user cache.
+- **`@here` / `@channel` / `@everyone`** → broadcast entities (`<!here>` etc.).
+- **Ambiguous/unknown** (e.g. `@Taylor` when 7 people match, or a bare first name) is left as literal text **with a stderr warning** — a non-ping beats a mis-ping. Use the exact handle or paste `<@ID>` yourself.
+- **Not a mention**: `@` mid-token (`user@example.com`) and `@x` inside `` `code` ``/```` ``` ```` fences are never resolved.
+
+Find a handle with `slack users <name>`. The cache is warmed by `slack channels` / `slack users`; re-run those if a freshly-renamed handle won't resolve.
+
 ### Sending text: prefer `--text-file`
 
 For anything beyond a trivial one-liner, pass the body via `--text-file <path>` (or `--text-file -` for stdin) instead of the inline positional. Inline text goes through the shell, so backticks, `$(...)`, quotes, and newlines get mangled or trigger command substitution — the same class of failure that mandates `gh ... --body-file` over `--body`. The file path is read verbatim, no shell interpretation. Write the body with a Write tool to a tmpfile, then point `--text-file` at it.
