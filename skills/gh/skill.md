@@ -166,6 +166,20 @@ rm -f /tmp/review-payload.json
 | `comments[].start_line` | No | First line of a multi-line comment |
 | `comments[].start_side` | No | Side for `start_line` |
 
+### Replying to / editing an inline comment
+
+```bash
+# Reply to an existing inline comment (thread reply, not a new top-level comment)
+jq -n --rawfile body /tmp/reply.md '{body: $body}' > /tmp/reply-payload.json
+gh api repos/{owner}/{repo}/pulls/comments/{comment_id}/replies --input /tmp/reply-payload.json
+
+# Edit an existing comment
+gh api -X PATCH repos/{owner}/{repo}/pulls/comments/{comment_id} --input /tmp/reply-payload.json
+
+# Always verify what actually landed — don't trust the POST/PATCH response body alone
+gh api repos/{owner}/{repo}/pulls/comments/{comment_id} --jq '.body'
+```
+
 ## Code Search
 
 ```bash
@@ -226,6 +240,7 @@ Always use single quotes around jq expressions to prevent shell interpretation o
 
 - **Auth mismatch**: If `gh` says "could not determine repo owner", run `ghswitch` or `gh auth switch --user <work-account>`.
 - **Token scopes**: Work token has `gist`, `read:org`, `repo`. If an operation fails with 403, check scopes with `gh auth status`.
+- **`-f key=@file` doesn't expand**: `gh api -f body=@/path/to/file` can post the literal string `@/path/to/file` instead of the file's contents (seen on `pulls/comments` POST/PATCH). Don't rely on `@file` expansion for comment bodies — build JSON with `jq -n --rawfile body <file> '{body: $body}'` and pass it via `--input payload.json` instead, then GET the comment back to confirm the body actually landed.
 
 ## Tips
 
