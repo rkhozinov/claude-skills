@@ -1,9 +1,9 @@
 ---
-name: tuxedo-todo
+name: tuxedo
 description: Use when the user wants to add, list, complete, or manage tasks in their tuxedo/todo.txt task list — "add a task", "what's on my todo list", "mark task done", "my tuxedo todos"
 ---
 
-# tuxedo-todo
+# tuxedo
 
 ## Overview
 `tuxedo` is a local CLI/TUI for todo.txt task files (installed via `brew install tuxedo`). No daemon, no API — every command is a one-shot process that reads/writes a plain text file. Use the CLI subcommands (never the TUI) for agent-driven task management.
