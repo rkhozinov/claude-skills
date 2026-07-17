@@ -11,6 +11,13 @@ description: Use when the user wants to add, list, complete, or manage tasks in 
 ## Which file it edits
 Resolution order: `$TODO_FILE` → `$TODO_DIR/todo.txt` → `./todo.txt`. If the user has a personal task file (e.g. synced via iCloud), set `TODO_FILE` to that path before running commands. Otherwise commands act on `./todo.txt` in the current directory.
 
+**Agent gotcha — always target the GLOBAL file.** The user exports `TODO_FILE` in their shell profile, but the non-interactive shell an agent runs in does NOT load that profile — `TODO_FILE` comes back unset and tuxedo silently falls to `./todo.txt` in the cwd (wrong file, e.g. inside some unrelated repo). So **resolve and `export TODO_FILE` explicitly in every command block**:
+```bash
+grep -h 'TODO_FILE' ~/.zshrc ~/.zprofile ~/.zshenv 2>/dev/null   # e.g. "$HOME/Library/Mobile Documents/com~apple~CloudDocs/Tuxedo/todo.txt"
+export TODO_FILE="$HOME/Library/Mobile Documents/com~apple~CloudDocs/Tuxedo/todo.txt"
+```
+If no `TODO_FILE` is configured anywhere, ask the user for their global path — never default to `./todo.txt`.
+
 ## Commands
 Task numbers are 1-based **file line numbers**, exactly as printed by `list` — not sorted-view position.
 
@@ -30,16 +37,26 @@ Full list: `tuxedo --help`.
 ## Claude-authored tasks (metadata breadcrumbs)
 When **you (Claude) add a task on the user's behalf**, append `key:value` metadata so every task traces back to its origin — todo.txt has no notes field, so these tags are how context survives:
 
-- `cc:<session-id>` — **always add this.** Use your current Claude Code session id, taken from the `Claude-Session` URL in your runtime context (the part after `/session_` → e.g. `cc:session_01AbC…`). Later, any session can find what it (or another session) created: `tuxedo list "cc:session_01AbC"`.
-- `ref:<pointer>` — when the task came from a PR/issue/ticket, add a breadcrumb (`ref:PR-1`, `ref:<prefix>-123`) pointing at where the detail lives.
+- `cc:<session-id>` — **always add this, and use the RESUMABLE id** so the user can `claude --resume <id>` to reopen the exact session the task came from. That id is the session **UUID**, not the `session_…` string from any `Claude-Session` URL (that URL may be absent, and its id is not what `--resume` takes). **Never fabricate it** — look it up and verify:
+  ```bash
+  # UUID = the agent scratchpad dir's basename, and the newest transcript for this cwd:
+  ls -t ~/.claude/projects/<cwd-slug>/*.jsonl | head -1     # basename minus .jsonl = session id
+  grep -l "<a unique string from this conversation>" ~/.claude/projects/<cwd-slug>/<id>.jsonl   # confirm it's really this session
+  ```
+- `dir:<absolute-path>` — where the work lives on disk (so a future session can `cd` straight there). Single token, no spaces.
+- `repo:<url>` — git remote / GitHub URL. Omit (or `repo:local`) until the repo is pushed.
+- `pr:<url>` — the PR, once one is opened.
+- `ref:<pointer>` — any other origin breadcrumb (`ref:<prefix>-123`) pointing at where detail lives.
 
-`key:value` values are a **single token — no spaces**. Put human context in the task text, structured pointers in tags:
+`key:value` values are a **single token — no spaces**. Put human context in the task text, structured pointers in tags. Always `export TODO_FILE` first (see the gotcha above):
 
+```bash
+export TODO_FILE="$HOME/Library/Mobile Documents/com~apple~CloudDocs/Tuxedo/todo.txt"
+tuxedo add "member-of collections: cross-cutting groups +ontology-link-editor @feature \
+  dir:/Users/me/repos/<org>/ontology-link-editor cc:613bb074-6d6c-4de1-923f-7cc98ba3a203"
 ```
-tuxedo add "Fix flaky auth test in login flow +<org> @claude ref:<prefix>-42 cc:session_01AbC"
-```
 
-Review Claude-created tasks: `tuxedo list "cc:"` (matches any session) or filter by a specific `cc:` id.
+Review Claude-created tasks: `tuxedo list "cc:"` (matches any session) or filter by a specific `cc:` id / `dir:` path.
 
 ## JSON shape
 `tuxedo list --json` returns an array of `{n, raw, done, priority, created, completed, projects, contexts, due, rec, t}`. Use `n` for subsequent `do`/`pri`/`del` calls.
