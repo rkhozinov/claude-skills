@@ -27,6 +27,20 @@ Task numbers are 1-based **file line numbers**, exactly as printed by `list` —
 
 Full list: `tuxedo --help`.
 
+## Claude-authored tasks (metadata breadcrumbs)
+When **you (Claude) add a task on the user's behalf**, append `key:value` metadata so every task traces back to its origin — todo.txt has no notes field, so these tags are how context survives:
+
+- `cc:<session-id>` — **always add this.** Use your current Claude Code session id, taken from the `Claude-Session` URL in your runtime context (the part after `/session_` → e.g. `cc:session_01AbC…`). Later, any session can find what it (or another session) created: `tuxedo list "cc:session_01AbC"`.
+- `ref:<pointer>` — when the task came from a PR/issue/ticket, add a breadcrumb (`ref:PR-1`, `ref:<prefix>-123`) pointing at where the detail lives.
+
+`key:value` values are a **single token — no spaces**. Put human context in the task text, structured pointers in tags:
+
+```
+tuxedo add "Fix flaky auth test in login flow +<org> @claude ref:<prefix>-42 cc:session_01AbC"
+```
+
+Review Claude-created tasks: `tuxedo list "cc:"` (matches any session) or filter by a specific `cc:` id.
+
 ## JSON shape
 `tuxedo list --json` returns an array of `{n, raw, done, priority, created, completed, projects, contexts, due, rec, t}`. Use `n` for subsequent `do`/`pri`/`del` calls.
 
