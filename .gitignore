@@ -3,3 +3,6 @@ __pycache__/
 *.pyo
 .DS_Store
 
+
+# skill-creator eval scratch
+skills/*-workspace/

@@ -21,3 +21,4 @@ claude /plugin install claude-skills
 | `claude-diff` | Open Zed / PyCharm visual diff for git changes |
 | `skill-creator` | Author, evaluate, and benchmark skills |
 | `awk-sed` | awk/sed one-liner reference for shell pipeline transforms |
+| `matter-cli` | Matter reading-app CLI: reading list, highlights, tags, search |
