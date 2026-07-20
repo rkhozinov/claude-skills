@@ -46,14 +46,14 @@ When **you (Claude) add a task on the user's behalf**, append `key:value` metada
 - `dir:<absolute-path>` — where the work lives on disk (so a future session can `cd` straight there). Single token, no spaces.
 - `repo:<url>` — git remote / GitHub URL. Omit (or `repo:local`) until the repo is pushed.
 - `pr:<url>` — the PR, once one is opened.
-- `ref:<pointer>` — any other origin breadcrumb (`ref:<prefix>-123`) pointing at where detail lives.
+- `ref:<pointer>` — any other origin breadcrumb (`ref:PROJ-123`) pointing at where detail lives.
 
 `key:value` values are a **single token — no spaces**. Put human context in the task text, structured pointers in tags. Always `export TODO_FILE` first (see the gotcha above):
 
 ```bash
 export TODO_FILE="$HOME/Library/Mobile Documents/com~apple~CloudDocs/Tuxedo/todo.txt"
-tuxedo add "member-of collections: cross-cutting groups +ontology-link-editor @feature \
-  dir:/Users/me/repos/<org>/ontology-link-editor cc:613bb074-6d6c-4de1-923f-7cc98ba3a203"
+tuxedo add "add retry logic to the upload path +api-client @feature \
+  dir:/Users/me/repos/api-client cc:613bb074-6d6c-4de1-923f-7cc98ba3a203"
 ```
 
 Review Claude-created tasks: `tuxedo list "cc:"` (matches any session) or filter by a specific `cc:` id / `dir:` path.
