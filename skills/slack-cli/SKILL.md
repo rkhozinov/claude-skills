@@ -102,6 +102,8 @@ Code spans/fences and link URLs are protected, so `**`/`_` inside them survive. 
 
 `send`/`reply` resolve `@handle` in the body to a real Slack mention (`<@Uid>`) so the person gets pinged — runs even with `--raw` (it's resolution, not formatting). Rules:
 
+> **AUTHORING RULE (agent MUST follow):** when writing a mention, ALWAYS use the exact **handle** (`@alice.king`) or a **quoted full name** (`@"Sam Eliwa"`). NEVER write a bare first name (`@Sam`) or an unquoted `@First Last`. Reason: a bare first name silently matches a *handle equal to that word* — at <org> `@<handle>` is Sam **<surname>** (`user@example.com`), not whichever Sam you meant — and this workspace has ambiguous names. An unquoted `@First Last` only works if `First Last` is an exact real-name match; one token off and it degrades to the bare-first-name landmine. When unsure of the handle, run `slack users <name>` first, or paste `<@ID>` yourself.
+
 - **Exact match only** — `@<handle>` (handle) or `@"Sam <surname>"` (quoted full name). Matched case-insensitively against the user cache.
 - **`@here` / `@channel` / `@everyone`** → broadcast entities (`<!here>` etc.).
 - **Ambiguous/unknown** (e.g. `@Taylor` when 7 people match, or a bare first name) is left as literal text **with a stderr warning** — a non-ping beats a mis-ping. Use the exact handle or paste `<@ID>` yourself.
@@ -145,7 +147,7 @@ slack search 'in:#engineering deploy after:2026-04-01' -n 20
 
 # find a user's id by name, then DM them
 slack users alice                             # → row with U… id
-slack send "@Alice King" "ping — got a sec?"  # @name resolves via cache
+slack send '@"Alice King"' "ping — got a sec?"  # quoted full name (or handle @alice.king) — never bare @Alice
 
 # discover file IDs in a thread, then download
 slack thread C0… 1778… --json | jq -r '.messages[].files[]? | .id + "\t" + .name'
