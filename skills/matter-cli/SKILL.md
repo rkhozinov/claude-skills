@@ -1,6 +1,6 @@
 ---
 name: matter-cli
-description: Read and manage the user's Matter reading app (getmatter.com) from the terminal via the `matter` CLI — reading list/queue, inbox, archive, article full text, search, highlights/annotations, tags, favorites, and saving URLs to read later. This skill is the ONLY way to reach the user's Matter library, so use it for ANY request that touches Matter, including short read-only ones — "what's in my matter queue", "what have I been reading lately", "pull up my reading list", "show the highlights I made", "clean up my tags" — as well as actions like "save this to matter" or "tag that article". Trigger on any mention of Matter, getmatter, a "read-later" / "reading list" / saved-articles library, or highlights/annotations on saved reading. Do not answer from memory or say you lack access — consult this skill first. (Kindle highlights, browser bookmarks, todo/shopping lists, and generic web reading are NOT Matter — skip those.)
+description: Read and manage the user's Matter reading app (getmatter.com) — reading list, inbox, archive, article text, search, highlights, tags, save URLs. Use for any mention of Matter or a read-later library.
 user_invocable: false
 ---
 

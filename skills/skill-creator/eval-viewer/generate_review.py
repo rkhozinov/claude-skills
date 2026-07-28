@@ -28,7 +28,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 # Files to exclude from output listings
-META<prefix>A_FILES = {"transcript.md", "user_notes.md", "metrics.json"}
+METADATA_FILES = {"transcript.md", "user_notes.md", "metrics.json"}
 
 # Extensions we render as inline text
 TEXT_EXTENSIONS = {
@@ -123,7 +123,7 @@ def build_run(root: Path, run_dir: Path) -> dict | None:
     output_files: list[dict] = []
     if outputs_dir.is_dir():
         for f in sorted(outputs_dir.iterdir()):
-            if f.is_file() and f.name not in META<prefix>A_FILES:
+            if f.is_file() and f.name not in METADATA_FILES:
                 output_files.append(embed_file(f))
 
     # Load grading if present
@@ -278,7 +278,7 @@ def generate_html(
 
     data_json = json.dumps(embedded)
 
-    return template.replace("/*__EMBEDDED_<prefix>A__*/", f"const EMBEDDED_<prefix>A = {data_json};")
+    return template.replace("/*__EMBEDDED_DATA__*/", f"const EMBEDDED_DATA = {data_json};")
 
 
 # ---------------------------------------------------------------------------

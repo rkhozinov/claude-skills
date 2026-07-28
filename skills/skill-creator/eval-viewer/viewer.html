@@ -646,7 +646,7 @@
 
   <script>
     // ---- Embedded data (injected by generate_review.py) ----
-    /*__EMBEDDED_<prefix>A__*/
+    /*__EMBEDDED_DATA__*/
 
     // ---- State ----
     let feedbackMap = {};  // run_id -> feedback text
@@ -659,8 +659,8 @@
       // iteration (indicated by previous_feedback being present). When
       // previous feedback exists, the feedback.json on disk is stale from
       // the prior iteration and should not pre-fill the textareas.
-      const hasPrevious = Object.keys(EMBEDDED_<prefix>A.previous_feedback || {}).length > 0
-        || Object.keys(EMBEDDED_<prefix>A.previous_outputs || {}).length > 0;
+      const hasPrevious = Object.keys(EMBEDDED_DATA.previous_feedback || {}).length > 0
+        || Object.keys(EMBEDDED_DATA.previous_outputs || {}).length > 0;
       if (!hasPrevious) {
         try {
           const resp = await fetch("/api/feedback");
@@ -671,7 +671,7 @@
         } catch { /* first run, no feedback yet */ }
       }
 
-      document.getElementById("skill-name").textContent = EMBEDDED_<prefix>A.skill_name;
+      document.getElementById("skill-name").textContent = EMBEDDED_DATA.skill_name;
       showRun(0);
 
       // Wire up feedback auto-save
@@ -687,7 +687,7 @@
     // ---- Navigation ----
     function navigate(delta) {
       const newIndex = currentIndex + delta;
-      if (newIndex >= 0 && newIndex < EMBEDDED_<prefix>A.runs.length) {
+      if (newIndex >= 0 && newIndex < EMBEDDED_DATA.runs.length) {
         saveCurrentFeedback();
         showRun(newIndex);
       }
@@ -696,17 +696,17 @@
     function updateNavButtons() {
       document.getElementById("prev-btn").disabled = currentIndex === 0;
       document.getElementById("next-btn").disabled =
-        currentIndex === EMBEDDED_<prefix>A.runs.length - 1;
+        currentIndex === EMBEDDED_DATA.runs.length - 1;
     }
 
     // ---- Show a run ----
     function showRun(index) {
       currentIndex = index;
-      const run = EMBEDDED_<prefix>A.runs[index];
+      const run = EMBEDDED_DATA.runs[index];
 
       // Progress
       document.getElementById("progress").textContent =
-        `${index + 1} of ${EMBEDDED_<prefix>A.runs.length}`;
+        `${index + 1} of ${EMBEDDED_DATA.runs.length}`;
 
       // Prompt
       document.getElementById("prompt-text").textContent = run.prompt;
@@ -734,7 +734,7 @@
       renderGrades(run);
 
       // Previous feedback
-      const prevFb = (EMBEDDED_<prefix>A.previous_feedback || {})[run.id];
+      const prevFb = (EMBEDDED_DATA.previous_feedback || {})[run.id];
       const prevEl = document.getElementById("prev-feedback");
       if (prevFb) {
         document.getElementById("prev-feedback-text").textContent = prevFb;
@@ -752,7 +752,7 @@
       // Track visited runs and promote done button when all visited
       visitedRuns.add(index);
       const doneBtn = document.getElementById("done-btn");
-      if (visitedRuns.size >= EMBEDDED_<prefix>A.runs.length) {
+      if (visitedRuns.size >= EMBEDDED_DATA.runs.length) {
         doneBtn.classList.add("ready");
       }
 
@@ -915,7 +915,7 @@
     function renderPrevOutputs(run) {
       const section = document.getElementById("prev-outputs-section");
       const content = document.getElementById("prev-outputs-content");
-      const prevOutputs = (EMBEDDED_<prefix>A.previous_outputs || {})[run.id];
+      const prevOutputs = (EMBEDDED_DATA.previous_outputs || {})[run.id];
 
       if (!prevOutputs || prevOutputs.length === 0) {
         section.style.display = "none";
@@ -992,7 +992,7 @@
 
     // ---- Feedback (saved to server -> feedback.json) ----
     function saveCurrentFeedback() {
-      const run = EMBEDDED_<prefix>A.runs[currentIndex];
+      const run = EMBEDDED_DATA.runs[currentIndex];
       const text = document.getElementById("feedback").value;
 
       if (text.trim() === "") {
@@ -1025,7 +1025,7 @@
     // ---- Done ----
     function showDoneDialog() {
       // Save current textarea to feedbackMap (but don't POST yet)
-      const run = EMBEDDED_<prefix>A.runs[currentIndex];
+      const run = EMBEDDED_DATA.runs[currentIndex];
       const text = document.getElementById("feedback").value;
       if (text.trim() === "") {
         delete feedbackMap[run.id];
@@ -1037,7 +1037,7 @@
       // can distinguish "no feedback" (looks good) from "not reviewed"
       const reviews = [];
       const ts = new Date().toISOString();
-      for (const r of EMBEDDED_<prefix>A.runs) {
+      for (const r of EMBEDDED_DATA.runs) {
         reviews.push({ run_id: r.id, feedback: feedbackMap[r.id] || "", timestamp: ts });
       }
       const payload = JSON.stringify({ reviews, status: "complete" }, null, 2);
@@ -1112,7 +1112,7 @@
 
     // ---- Benchmark rendering ----
     function renderBenchmark() {
-      const data = EMBEDDED_<prefix>A.benchmark;
+      const data = EMBEDDED_DATA.benchmark;
       if (!data) return;
 
       // Show the tabs

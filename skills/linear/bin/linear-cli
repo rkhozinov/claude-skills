@@ -398,7 +398,7 @@ def _merge_data(payload: dict, data_json: str | None) -> dict:
 
 # ---------------------------------------------------------------- CLI root
 
-<prefix>RED_OUTPUT_OPTS = [
+SHARED_OUTPUT_OPTS = [
     click.option("--output", "-o", "out_fmt", type=click.Choice(["table", "json", "ndjson"]), default="table"),
     click.option("--filter", "filters", multiple=True),
     click.option("--fields"),
@@ -412,7 +412,7 @@ def _merge_data(payload: dict, data_json: str | None) -> dict:
 
 
 def shared_output(f):
-    for opt in reversed(<prefix>RED_OUTPUT_OPTS):
+    for opt in reversed(SHARED_OUTPUT_OPTS):
         f = opt(f)
     return f
 

@@ -1,7 +1,7 @@
 {
   "name": "claude-skills",
-  "version": "1.6.0",
-  "description": "Personal grab-bag of Claude Code skills: gh, grafana, slack-cli, linear-cli, issue, things3, tuxedo, nb, archive-sessions, claude-diff, skill-creator, awk-sed, matter-cli, plus vendored brainstorming, systematic-debugging, test-driven-development, and ponytail.",
+  "version": "1.7.0",
+  "description": "Personal grab-bag of Claude Code skills: gh, grafana, slack-cli, linear, issue, tuxedo, skill-creator, matter-cli, plus vendored brainstorming, systematic-debugging, test-driven-development, and ponytail.",
   "author": {
     "name": "Ruslan Khozinov",
     "url": "https://github.com/rkhozinov"

@@ -6,7 +6,7 @@ user_invocable: false
 
 # Grafana Cloud / IRM / OnCall Access
 
-Active stack: `<stack>.grafana.net` (instance ID `<INS<prefix>CE_ID>`).
+Active stack: `<stack>.grafana.net` (instance ID `<INSTANCE_ID>`).
 Old stack `terraform/grafana/<org>/` is deprecated — never modify.
 SoT for tokens/IDs: `terraform/grafana/<stack>-monitoring/` outputs.
 
@@ -15,7 +15,7 @@ SoT for tokens/IDs: `terraform/grafana/<stack>-monitoring/` outputs.
 | Need | Token | Header |
 |---|---|---|
 | Grafana stack API (`/api/...` on `<stack>.grafana.net`) | `grafana_sa_token` (TF output) | `Authorization: Bearer <token>` |
-| OnCall API (`<oncall-host>.grafana.net`) | `grafana_sa_token` | `Authorization: <token>` (no Bearer) + `X-Grafana-Instance-ID: <INS<prefix>CE_ID>` |
+| OnCall API (`<oncall-host>.grafana.net`) | `grafana_sa_token` | `Authorization: <token>` (no Bearer) + `X-Grafana-Instance-ID: <INSTANCE_ID>` |
 | Cloud Provider/Stack mgmt (rare) | `GRAFANA_CLOUD_ACCESS_POLICY_TOKEN` (env, set by zshrc) | `Authorization: Bearer <token>` |
 
 Pitfall: `GRAFANA_CLOUD_ACCESS_POLICY_TOKEN` returns **401** on stack/IRM/OnCall API. Always use SA token from TF output for those.
@@ -26,7 +26,7 @@ Pitfall: `GRAFANA_CLOUD_ACCESS_POLICY_TOKEN` returns **401** on stack/IRM/OnCall
 cd /path/to/terraform/infrastructure/terraform/grafana/<stack>-monitoring
 terraform init -input=false -backend=true >/dev/null   # first time only
 SA_TOKEN=$(terraform output -raw grafana_sa_token)
-INS<prefix>CE_ID=$(terraform output -raw grafana_instance_id)   # <INS<prefix>CE_ID>
+INSTANCE_ID=$(terraform output -raw grafana_instance_id)   # <INSTANCE_ID>
 STACK_URL=$(terraform output -raw stack_url)               # https://<stack>.grafana.net
 ONCALL_URL=$(terraform output -raw oncall_api_url)         # https://<oncall-host>.grafana.net/oncall
 ```
@@ -58,7 +58,7 @@ OnCall states: `new` (firing), `acknowledged`, `resolved`, `silenced`. There is 
 
 ```bash
 curl -sS -o /tmp/ag.json \
-  -H "Authorization: $SA_TOKEN" -H "X-Grafana-Instance-ID: $INS<prefix>CE_ID" \
+  -H "Authorization: $SA_TOKEN" -H "X-Grafana-Instance-ID: $INSTANCE_ID" \
   "$ONCALL_URL/api/v1/alert_groups/?state=new&per_page=100"
 jq '{count, results: [.results[] | {id, title, alerts_count, created_at, integration_id, route_id}]}' /tmp/ag.json
 ```
@@ -66,7 +66,7 @@ jq '{count, results: [.results[] | {id, title, alerts_count, created_at, integra
 ### All alert groups (paginated)
 ```bash
 curl -sS -o /tmp/ag.json \
-  -H "Authorization: $SA_TOKEN" -H "X-Grafana-Instance-ID: $INS<prefix>CE_ID" \
+  -H "Authorization: $SA_TOKEN" -H "X-Grafana-Instance-ID: $INSTANCE_ID" \
   "$ONCALL_URL/api/v1/alert_groups/?per_page=50"
 ```
 Response: `{count, next, previous, results: [...]}`. Follow `next` until null.
@@ -75,7 +75,7 @@ Response: `{count, next, previous, results: [...]}`. Follow `next` until null.
 ```bash
 AG_ID=IQR1MC88VE2RY
 curl -sS -o /tmp/al.json \
-  -H "Authorization: $SA_TOKEN" -H "X-Grafana-Instance-ID: $INS<prefix>CE_ID" \
+  -H "Authorization: $SA_TOKEN" -H "X-Grafana-Instance-ID: $INSTANCE_ID" \
   "$ONCALL_URL/api/v1/alerts/?alert_group_id=$AG_ID"
 jq '.results[0].payload | {alertname: .labels.alertname, summary: (.commonAnnotations.summary // .annotations.summary // .summary), status, labels}' /tmp/al.json
 ```
@@ -83,24 +83,24 @@ jq '.results[0].payload | {alertname: .labels.alertname, summary: (.commonAnnota
 ### Acknowledge / Resolve / Silence
 ```bash
 # Ack
-curl -sS -X POST -H "Authorization: $SA_TOKEN" -H "X-Grafana-Instance-ID: $INS<prefix>CE_ID" \
+curl -sS -X POST -H "Authorization: $SA_TOKEN" -H "X-Grafana-Instance-ID: $INSTANCE_ID" \
   "$ONCALL_URL/api/v1/alert_groups/$AG_ID/acknowledge/"
 # Resolve
-curl -sS -X POST -H "Authorization: $SA_TOKEN" -H "X-Grafana-Instance-ID: $INS<prefix>CE_ID" \
+curl -sS -X POST -H "Authorization: $SA_TOKEN" -H "X-Grafana-Instance-ID: $INSTANCE_ID" \
   "$ONCALL_URL/api/v1/alert_groups/$AG_ID/resolve/"
 # Silence (e.g. 3600s)
-curl -sS -X POST -H "Authorization: $SA_TOKEN" -H "X-Grafana-Instance-ID: $INS<prefix>CE_ID" \
+curl -sS -X POST -H "Authorization: $SA_TOKEN" -H "X-Grafana-Instance-ID: $INSTANCE_ID" \
   -H "Content-Type: application/json" -d '{"delay":3600}' \
   "$ONCALL_URL/api/v1/alert_groups/$AG_ID/silence/"
 ```
 
 ### List integrations / routes / escalation chains
 ```bash
-curl -sS -H "Authorization: $SA_TOKEN" -H "X-Grafana-Instance-ID: $INS<prefix>CE_ID" \
+curl -sS -H "Authorization: $SA_TOKEN" -H "X-Grafana-Instance-ID: $INSTANCE_ID" \
   "$ONCALL_URL/api/v1/integrations/?per_page=100" -o /tmp/int.json
 jq '.results[] | {id, name, type, team_id}' /tmp/int.json
 
-curl -sS -H "Authorization: $SA_TOKEN" -H "X-Grafana-Instance-ID: $INS<prefix>CE_ID" \
+curl -sS -H "Authorization: $SA_TOKEN" -H "X-Grafana-Instance-ID: $INSTANCE_ID" \
   "$ONCALL_URL/api/v1/escalation_chains/?per_page=100" -o /tmp/esc.json
 ```
 

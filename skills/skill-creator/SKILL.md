@@ -363,7 +363,7 @@ Present the eval set to the user for review using the HTML template:
 
 1. Read the template from `assets/eval_review.html`
 2. Replace the placeholders:
-   - `__EVAL_<prefix>A_PLACEHOLDER__` → the JSON array of eval items (no quotes around it — it's a JS variable assignment)
+   - `__EVAL_DATA_PLACEHOLDER__` → the JSON array of eval items (no quotes around it — it's a JS variable assignment)
    - `__SKILL_NAME_PLACEHOLDER__` → the skill's name
    - `__SKILL_DESCRIPTION_PLACEHOLDER__` → the skill's current description
 3. Write to a temp file (e.g., `/tmp/eval_review_<skill-name>.html`) and open it: `open /tmp/eval_review_<skill-name>.html`
