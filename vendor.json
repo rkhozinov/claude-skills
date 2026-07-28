@@ -1,0 +1,35 @@
+{
+  "_comment": "Upstream provenance for vendored skills. Consumed by scripts/vendor-refresh.sh. Bump 'ref' to pull a newer upstream, then run the script and review the diff.",
+  "sources": [
+    {
+      "name": "superpowers",
+      "repo": "https://github.com/obra/superpowers.git",
+      "ref": "v6.2.0",
+      "sha": "3dcbd5c4b48e02263fbf4a3c01e3fe4f81d584d9",
+      "license": "LICENSE-superpowers",
+      "skills": [
+        "brainstorming",
+        "systematic-debugging",
+        "test-driven-development"
+      ],
+      "prune": [
+        "systematic-debugging/CREATION-LOG.md",
+        "systematic-debugging/test-pressure-1.md",
+        "systematic-debugging/test-pressure-2.md",
+        "systematic-debugging/test-pressure-3.md",
+        "systematic-debugging/test-academic.md"
+      ]
+    },
+    {
+      "name": "ponytail",
+      "repo": "https://github.com/DietrichGebert/ponytail.git",
+      "ref": "v4.8.4",
+      "sha": "bc9ee949d5f439e8b9f3bb92c6d6d3d1e6ebd324",
+      "license": "LICENSE-ponytail",
+      "skills": [
+        "ponytail"
+      ],
+      "prune": []
+    }
+  ]
+}

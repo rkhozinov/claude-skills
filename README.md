@@ -25,10 +25,31 @@ claude /plugin install claude-skills
 | `brainstorming` | Explore intent and design before implementation |
 | `systematic-debugging` | Evidence-first debugging: reproduce, isolate, root-cause |
 | `test-driven-development` | Red-green-refactor loop for features and bugfixes |
+| `ponytail` | Lazy-senior-dev mode: YAGNI, stdlib first, shortest working diff |
 
 ## Attribution
 
-`brainstorming`, `systematic-debugging`, and `test-driven-development` are vendored
-from [obra/superpowers](https://github.com/obra/superpowers) (MIT, © Jesse Vincent),
-lightly edited to drop cross-references to skills not bundled here. Full license text
-in [`LICENSE-superpowers`](LICENSE-superpowers).
+Some skills here are vendored from upstream projects:
+
+| Skills | Upstream | License |
+|---|---|---|
+| `brainstorming`, `systematic-debugging`, `test-driven-development` | [obra/superpowers](https://github.com/obra/superpowers) | MIT, © Jesse Vincent — [`LICENSE-superpowers`](LICENSE-superpowers) |
+| `ponytail` | [DietrichGebert/ponytail](https://github.com/DietrichGebert/ponytail) | MIT, © DietrichGebert — [`LICENSE-ponytail`](LICENSE-ponytail) |
+
+Exact upstream refs and commit SHAs are pinned in [`vendor.json`](vendor.json).
+
+Local edits on top of upstream: cross-references to skills not bundled here are
+rewritten, upstream eval fixtures are pruned, and keyword-stuffed descriptions are
+shortened (they cost context in every session, and these skills are invoked
+deliberately rather than auto-triggered).
+
+To pull newer upstream versions, bump `ref` in `vendor.json` and run:
+
+```sh
+scripts/vendor-refresh.sh            # all sources
+scripts/vendor-refresh.sh ponytail   # just one
+```
+
+The script re-clones, re-applies every local edit, rewrites the pinned SHA to what it
+actually fetched, and leaves the result in the worktree for `git diff` review. It never
+commits.
