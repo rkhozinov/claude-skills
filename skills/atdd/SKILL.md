@@ -1,6 +1,6 @@
 ---
 name: atdd
-description: Acceptance-test-driven development with the four-layer model (spec / DSL / protocol driver / SUT). Use when writing acceptance tests, turning Gherkin or Given-When-Then scenarios into executable specs, building a test DSL or protocol driver, or reviewing an acceptance suite that breaks on every refactor.
+description: Design and review acceptance / end-to-end tests with the four-layer model (spec / DSL / protocol driver / SUT). Use when writing or reviewing acceptance, e2e, or BDD tests, auditing whether a suite is well-layered, turning Gherkin or Given-When-Then scenarios into executable specs, building or critiquing a test DSL, page objects, or protocol driver, or when acceptance tests are flaky, order-dependent, or break on every refactor. Not for unit tests.
 license: MIT
 ---
 
@@ -106,8 +106,15 @@ Before Phase 1, these must exist — if they do not, build them first or ask:
 ## Reviewing an existing suite
 
 Read [references/CHECKLIST.md](references/CHECKLIST.md) and report violations by layer.
-Most common findings, in order: assertions in the DSL, status codes in the spec, stubbed
-internal DB, per-scenario cleanup, hardcoded identifiers that break on re-run.
+
+Grep the DSL for `assert` / `expect` / `should` before anything else. A single hit is a
+violation, unconditionally — not a style preference, not "acceptable for a small suite."
+The assertion belongs in the driver, and a suite with asserts in the DSL is not well-layered
+however clean its imports look. Same for hardcoded identifiers: grep the specs for literal
+emails, usernames, and entity names — unaliased ones mean the suite cannot be re-run.
+
+Then the rest, in usual order of frequency: status codes or selectors in the spec, stubbed
+internal DB, per-scenario cleanup, DSL reading raw SUT payload shapes.
 
 ## Starting from a plain spec
 
