@@ -22,6 +22,7 @@ claude /plugin install claude-skills
 | `systematic-debugging` | Evidence-first debugging: reproduce, isolate, root-cause |
 | `test-driven-development` | Red-green-refactor loop for features and bugfixes |
 | `ponytail` | Lazy-senior-dev mode: YAGNI, stdlib first, shortest working diff |
+| `atdd` | Four-layer acceptance testing: spec / DSL / protocol driver / SUT |
 
 ## Attribution
 
@@ -33,6 +34,11 @@ Some skills here are vendored from upstream projects:
 | `ponytail` | [DietrichGebert/ponytail](https://github.com/DietrichGebert/ponytail) | MIT, © DietrichGebert — [`LICENSE-ponytail`](LICENSE-ponytail) |
 
 Exact upstream refs and commit SHAs are pinned in [`vendor.json`](vendor.json).
+
+`atdd` is not vendored — it is written here, synthesizing Dave Farley's four-layer
+acceptance testing model with the isolation, naming, and phase-gate rules from
+[AAID](https://github.com/dawid-dahl-umain/augmented-ai-development) (MIT, © Dawid Dahl).
+AAID's own `aaid-bdd` plugin is the fuller, longer treatment if you want it upstream.
 
 Local edits on top of upstream: cross-references to skills not bundled here are
 rewritten, upstream eval fixtures are pruned, and keyword-stuffed descriptions are
