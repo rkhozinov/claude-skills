@@ -6,3 +6,6 @@ __pycache__/
 
 # skill-creator eval scratch
 skills/*-workspace/
+
+# Local-only Claude Code rules (publish-hygiene, names employer identifiers) — never push
+CLAUDE.local.md
