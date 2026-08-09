@@ -6,7 +6,8 @@ user_invocable: false
 
 # Slack CLI Reference
 
-Wraps the Slack Web API behind a single Python CLI: `~/.claude/skills/slack-cli/bin/slack`.
+Wraps the Slack Web API behind a single Python CLI: `slack`, on `PATH` via
+`~/.local/bin/slack` → this skill's `bin/slack`.
 
 The CLI is a [PEP 723 inline-script](https://peps.python.org/pep-0723/) Python file run via `uv run --script` (shebang). First call installs `requests` to a uv-managed venv (~9ms thereafter).
 
@@ -48,6 +49,7 @@ slack users    '<query>' [-n 20]              # find users by name/handle/email 
 slack react    <channel> <ts> <emoji> [--remove]   # add/remove a reaction (needs reactions:write)
 slack file     <file-id> [-o <path>]          # download a file by id (default: ./<name>; -o - for stdout)
 slack raw      <method> [k=v …] [--post] [--force]   # escape hatch: any Web API method (--force: skip mrkdwn guardrail)
+slack style    scrape|stats|exemplars                # build the personal voice corpus (see `slack-style` skill)
 slack <cmd> --json                            # raw API JSON instead of formatted output
 ```
 
@@ -110,6 +112,21 @@ Code spans/fences and link URLs are protected, so `**`/`_` inside them survive. 
 - **Not a mention**: `@` mid-token (`user@example.com`) and `@x` inside `` `code` ``/```` ``` ```` fences are never resolved.
 
 Find a handle with `slack users <name>`. The cache is warmed by `slack channels` / `slack users`; re-run those if a freshly-renamed handle won't resolve.
+
+### Write in the user's voice, not yours
+
+> **AUTHORING RULE (agent MUST follow):** before any `send`/`reply`, read
+> `~/.claude/slack-voice/voice.md` and write the message in that voice. If the file
+> is missing, say so once (`run /slack-style to build it`) and keep the message short anyway.
+
+- **Default length is 1–3 lines.** The people receiving these messages are busy and did not
+  ask for a report. A wall of agent prose makes them do the work you skipped — read
+  [nomeatproxy.com](https://nomeatproxy.com/) once if this feels excessive.
+- **When detail is genuinely needed**: put the verdict in the message, the detail in a thread
+  reply or a file, and **say what you left out** so they can ask ("full trace if you want it").
+- **Never claim more than was verified.** Short does not mean confident; if something is
+  unchecked, one clause says so.
+- Build or refresh the profile with the `slack-style` skill (`slack style scrape|stats|exemplars`).
 
 ### Sending text: prefer `--text-file`
 
@@ -207,6 +224,6 @@ jq '.enabledPlugins."slack@claude-plugins-official" = true' ~/.claude/settings.j
 
 ## Source
 
-- CLI: `~/.claude/skills/slack-cli/bin/slack` — single Python file, ~880 lines, argparse subcommands. Reads share one `format_message` formatter; name resolution is backed by in-memory + on-disk (`~/.cache/slack-cli/`) user/channel caches with `#name`/`@user` → id lookup.
+- CLI: this skill's `bin/slack` — single Python file, ~1300 lines, argparse subcommands. Reads share one `format_message` formatter; name resolution is backed by in-memory + on-disk (`~/.cache/slack-cli/`) user/channel caches with `#name`/`@user` → id lookup.
 - Token retrieval: `security find-generic-password -a "$USER" -s slack-xoxp -w` (or `SLACK_XOXP` env override).
 - Adding a subcommand: edit the script, add an `argparse` subparser + `cmd_*` function. No packaging, no install step.

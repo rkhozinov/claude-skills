@@ -69,10 +69,17 @@ def session() -> requests.Session:
 
 def call(method: str, *, params: dict | None = None, json_body: dict | None = None) -> dict:
     url = f"{API}/{method}"
-    if json_body is not None:
-        r = session().post(url, json=json_body, headers={"Content-Type": "application/json; charset=utf-8"})
-    else:
-        r = session().get(url, params=params or {})
+    for attempt in range(5):
+        if json_body is not None:
+            r = session().post(url, json=json_body, headers={"Content-Type": "application/json; charset=utf-8"})
+        else:
+            r = session().get(url, params=params or {})
+        if r.status_code != 429:
+            break
+        # Slack rate limit: honour Retry-After, back off a little extra each try.
+        wait = int(r.headers.get("Retry-After", "30")) + attempt
+        print(f"rate limited on {method}, sleeping {wait}s", file=sys.stderr)
+        time.sleep(wait)
     r.raise_for_status()
     data = r.json()
     if not data.get("ok"):
@@ -802,6 +809,7 @@ def cmd_search(args: argparse.Namespace) -> None:
             "sort": "timestamp",
             "sort_dir": "desc",
             "count": args.n,
+            "page": args.page,
         },
     )
     if args.json:
@@ -953,6 +961,238 @@ def cmd_whoami(args: argparse.Namespace) -> None:
 
 # --- argparse ------------------------------------------------------------
 
+# --- subcommand: style ---------------------------------------------------
+#
+# Builds a labeled corpus of the token owner's own messages, split by who
+# actually typed them. The split is exact, not guessed: Slack tags every
+# message posted through the Web API with app_id/bot_id, while a message typed
+# in a Slack client carries client_msg_id and neither of those. So "what I
+# sound like" (human) is cleanly separable from "what an agent posted as me".
+#
+# Enumeration goes through search.messages (cheap, complete, and the only way
+# to reach thread replies without walking every thread), but search does NOT
+# return app_id — only conversations.history/replies do. Hence two passes.
+#
+# Everything lands under ~/.claude/slack-voice/, never in this repo: the corpus
+# is real conversations with real people.
+
+STYLE_DIR = "~/.claude/slack-voice"
+
+
+def style_dir() -> str:
+    d = os.path.expanduser(os.environ.get("SLACK_VOICE_DIR", STYLE_DIR))
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def provenance(m: dict) -> str:
+    """'app' if Slack says an app posted this message, else 'human'."""
+    return "app" if (m.get("app_id") or m.get("bot_id")) else "human"
+
+
+def _search_mine(handle: str, after: str, max_pages: int) -> list[tuple[str, str, str]]:
+    """All my messages since `after` as (channel_id, ts, thread_ts|'') triples."""
+    out, page = [], 1
+    while page <= max_pages:
+        data = call("search.messages", params={
+            "query": f"from:@{handle} after:{after}",
+            "sort": "timestamp", "sort_dir": "desc", "count": 100, "page": page,
+        })
+        msgs = data["messages"]
+        for m in msgs["matches"]:
+            link = m.get("permalink", "")
+            thread = link.split("thread_ts=", 1)[1].split("&", 1)[0] if "thread_ts=" in link else ""
+            out.append((m["channel"]["id"], m["ts"], thread))
+        pag = msgs.get("pagination", {})
+        print(f"  search page {page}/{pag.get('page_count', '?')} ({len(out)} msgs)", file=sys.stderr)
+        if page >= pag.get("page_count", 1):
+            break
+        page += 1
+    return out
+
+
+def _emit(unit: list[dict], mine: str, seen: set, chan: str, ctype: str, fh) -> int:
+    """Walk one conversation unit (thread or history window) and write my messages."""
+    unit = sorted(unit, key=lambda m: float(m["ts"]))
+    n = 0
+    for i, m in enumerate(unit):
+        if m.get("user") != mine or m.get("subtype") or not m.get("text", "").strip():
+            continue
+        key = (chan, m["ts"])
+        if key in seen:
+            continue
+        seen.add(key)
+        prev = next((x for x in reversed(unit[:i]) if x.get("user") != mine), None)
+        nxt = next((x for x in unit[i + 1:] if x.get("user") != mine), None)
+        text = m["text"]
+        rec = {
+            "ts": m["ts"], "channel": chan, "channel_type": ctype,
+            "thread_ts": m.get("thread_ts", ""),
+            "provenance": provenance(m),
+            "text": text, "chars": len(text),
+            "reactions": sum(r.get("count", 0) for r in m.get("reactions", [])),
+            "prompt": (prev or {}).get("text", "")[:1500],
+            "next": (nxt or {}).get("text", "")[:1500],
+            "next_is_question": "?" in (nxt or {}).get("text", ""),
+            "reply_latency_s": round(float(nxt["ts"]) - float(m["ts"])) if nxt else None,
+        }
+        fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        n += 1
+    return n
+
+
+def cmd_style_scrape(args: argparse.Namespace) -> None:
+    mine, handle = me(), auth_info()["user"]
+    oldest = time.time() - parse_duration(args.since)
+    after = datetime.date.fromtimestamp(oldest).isoformat()
+    d = style_dir()
+    corpus = os.path.join(d, "corpus.jsonl")
+
+    seen: set = set()
+    if not args.full and os.path.exists(corpus):
+        with open(corpus) as fh:
+            for line in fh:
+                r = json.loads(line)
+                seen.add((r["channel"], r["ts"]))
+        print(f"{len(seen)} messages already in corpus (use --full to rebuild)", file=sys.stderr)
+
+    print(f"enumerating my messages since {after}…", file=sys.stderr)
+    targets = _search_mine(handle, after, args.max_pages)
+    threads = {(c, t) for c, _, t in targets if t}
+    channels = {c for c, _, t in targets if not t}
+    print(f"{len(targets)} messages across {len(threads)} threads / {len(channels)} channels",
+          file=sys.stderr)
+
+    ctypes = {}
+    for c in {c for c, _, _ in targets}:
+        ctypes[c] = "im" if c.startswith("D") else "channel"
+
+    written = 0
+    with open(corpus, "a") as fh:
+        # One unreadable conversation (left channel, archived DM, revoked scope)
+        # must not throw away the rest of the scrape — skip it and keep going.
+        skipped = 0
+        for i, (chan, tts) in enumerate(sorted(threads), 1):
+            try:
+                data = call("conversations.replies", params={"channel": chan, "ts": tts, "limit": 1000})
+            except SystemExit as e:
+                print(f"  skip thread {chan}/{tts}: {e}", file=sys.stderr)
+                skipped += 1
+                continue
+            written += _emit(data.get("messages", []), mine, seen, chan, ctypes.get(chan, "channel"), fh)
+            if i % 25 == 0:
+                print(f"  thread {i}/{len(threads)} ({written} written)", file=sys.stderr)
+        for i, chan in enumerate(sorted(channels), 1):
+            cursor = ""
+            while True:
+                params = {"channel": chan, "limit": 200, "oldest": f"{oldest:.6f}"}
+                if cursor:
+                    params["cursor"] = cursor
+                try:
+                    data = call("conversations.history", params=params)
+                except SystemExit as e:
+                    print(f"  skip channel {chan}: {e}", file=sys.stderr)
+                    skipped += 1
+                    break
+                written += _emit(data.get("messages", []), mine, seen, chan,
+                                 ctypes.get(chan, "channel"), fh)
+                cursor = data.get("response_metadata", {}).get("next_cursor", "")
+                if not cursor:
+                    break
+            print(f"  channel {i}/{len(channels)} ({written} written)", file=sys.stderr)
+        if skipped:
+            print(f"{skipped} unreadable conversation(s) skipped", file=sys.stderr)
+
+    with open(os.path.join(d, "state.json"), "w") as fh:
+        json.dump({"last_run": datetime.datetime.now().isoformat(timespec="seconds"),
+                   "since": after, "corpus_size": len(seen)}, fh, indent=2)
+    print(f"wrote {written} new records to {corpus} ({len(seen)} total)")
+
+
+def _load_corpus() -> list[dict]:
+    path = os.path.join(style_dir(), "corpus.jsonl")
+    if not os.path.exists(path):
+        raise SystemExit("no corpus yet — run: slack style scrape")
+    with open(path) as fh:
+        return [json.loads(line) for line in fh if line.strip()]
+
+
+def _pct(rows: list[dict], key: str, p: float) -> float:
+    vals = sorted(r[key] for r in rows)
+    return vals[min(int(len(vals) * p), len(vals) - 1)] if vals else 0
+
+
+def cmd_style_stats(args: argparse.Namespace) -> None:
+    rows = _load_corpus()
+    if args.json:
+        print(json.dumps(rows, indent=2, ensure_ascii=False))
+        return
+    buckets = {"human": [r for r in rows if r["provenance"] == "human"],
+               "app": [r for r in rows if r["provenance"] == "app"]}
+    out = ["# Slack voice: corpus stats", "",
+           f"corpus: {len(rows)} of my messages", "",
+           "| metric | typed by me | posted by an app |", "|---|---|---|"]
+
+    def col(fn):
+        return " | ".join(fn(b) for b in (buckets["human"], buckets["app"]))
+
+    def rate(b, pred):
+        return f"{100 * sum(1 for r in b if pred(r)) / len(b):.0f}%" if b else "-"
+
+    out += [
+        f"| messages | {col(lambda b: str(len(b)))} |",
+        f"| median chars | {col(lambda b: str(_pct(b, 'chars', 0.5)))} |",
+        f"| p90 chars | {col(lambda b: str(_pct(b, 'chars', 0.9)))} |",
+        f"| >1000 chars | {col(lambda b: rate(b, lambda r: r['chars'] > 1000))} |",
+        f"| got a reaction | {col(lambda b: rate(b, lambda r: r['reactions'] > 0))} |",
+        f"| drew a follow-up question | {col(lambda b: rate(b, lambda r: r['next_is_question']))} |",
+        f"| got no reply at all | {col(lambda b: rate(b, lambda r: r['reply_latency_s'] is None))} |",
+    ]
+    out += ["", "## Reaction rate by my message length", "", "| length | n | got a reaction |", "|---|---|---|"]
+    for lo, hi in [(0, 50), (50, 150), (150, 400), (400, 1000), (1000, 10**9)]:
+        b = [r for r in rows if lo <= r["chars"] < hi]
+        label = f"{lo}-{hi}" if hi < 10**9 else f"{lo}+"
+        out.append(f"| {label} | {len(b)} | {rate(b, lambda r: r['reactions'] > 0)} |")
+    out += [
+        "", "## Read this honestly",
+        "",
+        "Engagement columns are observational and badly confounded: app-posted messages were",
+        "written for the harder problems and often announce a resolved incident, which attracts",
+        "a thumbs-up regardless of length. Do not read the reaction column as evidence either way.",
+        "",
+        "The length columns are not confounded, and they are the point: the same person writes",
+        "two wildly different registers depending on who is typing. That is the gap this profile",
+        "closes. The case for the short register rests on the voice being real and on not making",
+        "colleagues read machine prose — not on these engagement rates.",
+    ]
+    text = "\n".join(out)
+    print(text)
+    with open(os.path.join(style_dir(), "stats.md"), "w") as fh:
+        fh.write(text + "\n")
+
+
+def cmd_style_exemplars(args: argparse.Namespace) -> None:
+    rows = [r for r in _load_corpus() if r["provenance"] == "human" and r["chars"] >= args.min_chars]
+    seen_text: set = set()
+    picked = []
+    for r in sorted(rows, key=lambda r: (-r["reactions"], -float(r["ts"]))):
+        norm = re.sub(r"\W+", " ", r["text"].lower()).strip()
+        if norm in seen_text:
+            continue
+        seen_text.add(norm)
+        picked.append(r)
+        if len(picked) >= args.n:
+            break
+    if args.json:
+        print(json.dumps(picked, indent=2, ensure_ascii=False))
+        return
+    for r in picked:
+        if r["prompt"]:
+            print(f"--- they said: {truncate(r['prompt'], 300)}")
+        print(f"+++ I replied ({r['chars']} chars, {r['reactions']} reactions): {r['text']}")
+        print()
+
+
 def main() -> None:
     p = argparse.ArgumentParser(prog="slack", description=__doc__)
     common = argparse.ArgumentParser(add_help=False)
@@ -1018,6 +1258,7 @@ def main() -> None:
     pq = sub.add_parser("search", parents=[common], help="search messages (slack query syntax)")
     pq.add_argument("query")
     pq.add_argument("-n", type=int, default=20)
+    pq.add_argument("--page", type=int, default=1, help="1-based result page (see messages.pagination)")
     pq.set_defaults(func=cmd_search)
 
     pc = sub.add_parser("channels", parents=[common], help="list channels (warms #name->id cache)")
@@ -1053,6 +1294,23 @@ def main() -> None:
 
     pw = sub.add_parser("whoami", parents=[common], help="auth.test result")
     pw.set_defaults(func=cmd_whoami)
+
+    pst = sub.add_parser("style", help="build a corpus of your own writing (see slack-style skill)")
+    ssub = pst.add_subparsers(dest="style_cmd", required=True)
+
+    pss = ssub.add_parser("scrape", parents=[common], help="fetch + label your messages")
+    pss.add_argument("--since", default="180d", help="how far back (default 180d)")
+    pss.add_argument("--full", action="store_true", help="ignore the existing corpus and refetch")
+    pss.add_argument("--max-pages", type=int, default=100, help="cap on search pages (100/page)")
+    pss.set_defaults(func=cmd_style_scrape)
+
+    pst2 = ssub.add_parser("stats", parents=[common], help="human vs app-posted evidence report")
+    pst2.set_defaults(func=cmd_style_stats)
+
+    pse = ssub.add_parser("exemplars", parents=[common], help="dump your best hand-typed messages")
+    pse.add_argument("-n", type=int, default=200)
+    pse.add_argument("--min-chars", type=int, default=15, help="skip one-word acks below this")
+    pse.set_defaults(func=cmd_style_exemplars)
 
     args = p.parse_args()
     load_caches()

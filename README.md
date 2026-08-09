@@ -14,6 +14,7 @@ claude /plugin install claude-skills
 | `gh` | GitHub CLI reference + multi-account auth recipes |
 | `grafana` | Grafana Cloud / IRM / OnCall API access |
 | `slack-cli` | Slack via local Python CLI (`bin/slack`) |
+| `slack-style` | Learn your own Slack writing voice from your history, so drafts sound like you |
 | `linear` | Linear operations through `linear-cli` |
 | `issue` | Create Linear issues from natural language |
 | `skill-creator` | Author, evaluate, and benchmark skills |
