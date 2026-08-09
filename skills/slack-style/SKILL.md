@@ -54,8 +54,12 @@ Read `slack style exemplars -n 200` output and `stats.md`, then write
    recurring openers and closers, emoji habits, how they address people, how they
    say "I'm on it" / "that's done" / "I was wrong". Quote the actual words.
 2. **Length** — the measured median and p90 from `stats.md`, stated as the target.
-3. **Escape hatch** — what to do when detail is genuinely needed (verdict in the
-   message, detail in a thread reply or a linked file, and say what was left out).
+3. **Escape hatch** — what to do when detail is genuinely needed: verdict in the
+   message, detail in a thread reply or behind a link, and say what was left out.
+   State explicitly that the link must be something the *recipient* can open — a PR,
+   a dashboard, a shared doc, a Slack file upload — and that a path on the sender's
+   own machine (`~/…`, `/tmp/…`) is never an acceptable pointer. An agent drafting
+   a message knows its own filesystem and will reach for it otherwise.
 4. **Anti-patterns** — drawn from the `app` bucket, which is a ready-made list of
    tells: em dashes, `*Bold lead-in.*` openers, bullet walls, stacked "two things"
    structure, unprompted jargon.
