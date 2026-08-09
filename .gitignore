@@ -7,5 +7,8 @@ __pycache__/
 # skill-creator eval scratch
 skills/*-workspace/
 
+# git worktrees live in-tree here
+.worktrees/
+
 # Local-only Claude Code rules (publish-hygiene, names employer identifiers) — never push
 CLAUDE.local.md
