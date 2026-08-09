@@ -9,6 +9,15 @@ user_invocable: false
 Wraps the Slack Web API behind a single Python CLI: `slack`, on `PATH` via
 `~/.local/bin/slack` → this skill's `bin/slack`.
 
+```bash
+ln -sfn "$CLAUDE_PLUGIN_ROOT/skills/slack-cli/bin/slack" ~/.local/bin/slack
+```
+
+`CLAUDE_PLUGIN_ROOT` is version-pinned, so **re-run that after every plugin update**
+(or point the link at a working checkout of this repo, which does not move). A stale
+link is silent: `slack` still runs, just an older build. Check with
+`readlink ~/.local/bin/slack`.
+
 The CLI is a [PEP 723 inline-script](https://peps.python.org/pep-0723/) Python file run via `uv run --script` (shebang). First call installs `requests` to a uv-managed venv (~9ms thereafter).
 
 Auth is a user OAuth token (xoxp) issued by the user's "Claude MCP" Slack app (App ID `<APP_ID>`, <org> workspace `<WORKSPACE_ID>`). Acts as the user — full search, DM access, posts as them.
