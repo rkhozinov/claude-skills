@@ -22,6 +22,14 @@ obsidian vaults verbose                                   # name<TAB>path for ev
 
 Resolution order: explicit `vault=<name>` argument → `$OBSIDIAN_VAULT` → active vault.
 
+**`vault=` must come first, before the subcommand.** As a trailing argument it is silently
+ignored and the command hits the active vault instead — a silent wrong-vault write.
+
+```bash
+obsidian vault=other-vault files      # correct: lists other-vault
+obsidian files vault=other-vault      # WRONG: lists the active vault, no error
+```
+
 **Every command needs the app running.** It is not launched on demand — with Obsidian closed,
 any command fails instantly with `The CLI is unable to find Obsidian. Please make sure Obsidian
 is running and try again.` (rc=1). On that error, either `open -a Obsidian` (CLI is responsive
@@ -34,7 +42,8 @@ rg -n "<query>" "$VAULT" -g '*.md'                                              
 
 `vault=<name>` only reaches vaults **registered in the app**. A folder of markdown that was never
 opened in Obsidian is invisible to every CLI command — say so and fall back to file tools on its
-path rather than reporting "not found".
+path rather than reporting "not found". Registering one means opening it in the app (`Open folder
+as vault`); `obsidian://open?path=…` does not register an unknown folder.
 
 ## Routing
 

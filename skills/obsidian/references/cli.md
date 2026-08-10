@@ -7,7 +7,7 @@ per-command detail with `obsidian help <command>`.
 
 | Thing | Detail |
 |---|---|
-| Vault selector | `vault=<name>` — name as shown by `obsidian vaults`, not a path |
+| Vault selector | `vault=<name>` — name as shown by `obsidian vaults`, not a path. **Must precede the subcommand** (`obsidian vault=X files`); trailing it is silently ignored and the active vault is used. |
 | `file=` vs `path=` | `file=` resolves by name like a wikilink (ambiguous across folders); `path=` is exact (`folder/note.md`). Prefer `path=`. |
 | Default target | Most commands fall back to the **active file** when `file=`/`path=` is omitted |
 | Quoting | `name="My Note"` for values with spaces |
