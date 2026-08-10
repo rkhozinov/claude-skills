@@ -12,7 +12,7 @@ per-command detail with `obsidian help <command>`.
 | Default target | Most commands fall back to the **active file** when `file=`/`path=` is omitted |
 | Quoting | `name="My Note"` for values with spaces |
 | Escapes | `\n` newline, `\t` tab inside `content=` |
-| Transport | Commands drive the **running app**. If it is not running, the command launches it. |
+| Transport | Commands drive the **running app**. If it is not running, every command fails instantly with `The CLI is unable to find Obsidian...` (rc=1) — it does not launch it. |
 
 ## Vault / discovery
 
@@ -53,8 +53,8 @@ per-command detail with `obsidian help <command>`.
 | `create` | `name=`, `path=`, `content=`, `template=<name>`, `overwrite`, `open`, `newtab` |
 | `append` | `file=`, `path=`, `content=` (required), `inline` (no leading newline) |
 | `prepend` | `file=`, `path=`, `content=` (required), `inline` |
-| `move` | `file=`, `path=`, `to=<path>` (required) — folder or full path; updates backlinks; **hangs often, verify on disk** |
-| `rename` | `file=`, `path=`, `name=<new name>` (required) — updates backlinks; same flakiness |
+| `move` | `file=`, `path=`, `to=<path>` (required) — folder or full path; updates backlinks; can hang on a stale app instance, verify on disk |
+| `rename` | `file=`, `path=`, `name=<new name>` (required) — updates backlinks; same |
 | `delete` | `file=`, `path=`, `permanent` (skips trash) |
 | `daily:append` / `daily:prepend` | `content=` (required), `inline`, `open`, `paneType=tab\|split\|window` |
 

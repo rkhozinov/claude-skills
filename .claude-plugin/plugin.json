@@ -1,6 +1,6 @@
 {
   "name": "claude-skills",
-  "version": "1.10.0",
+  "version": "1.10.1",
   "description": "Personal grab-bag of Claude Code skills: gh, grafana, slack-cli, slack-style, linear, issue, tuxedo, obsidian, skill-creator, matter-cli, atdd, plus vendored brainstorming, systematic-debugging, test-driven-development, and ponytail.",
   "author": {
     "name": "Ruslan Khozinov",
