@@ -19,6 +19,7 @@ claude /plugin install claude-skills
 | `issue` | Create Linear issues from natural language |
 | `skill-creator` | Author, evaluate, and benchmark skills |
 | `matter-cli` | Matter reading-app CLI: reading list, highlights, tags, search |
+| `obsidian` | Obsidian vault read/write/search/review via the official `obsidian` CLI |
 | `brainstorming` | Explore intent and design before implementation |
 | `systematic-debugging` | Evidence-first debugging: reproduce, isolate, root-cause |
 | `test-driven-development` | Red-green-refactor loop for features and bugfixes |
