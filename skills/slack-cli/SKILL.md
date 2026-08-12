@@ -57,6 +57,12 @@ slack channels [--types …] [--sort name|popularity] [-n 100]   # list channels
 slack users    '<query>' [-n 20]              # find users by name/handle/email (over the cache)
 slack react    <channel> <ts> <emoji> [--remove]   # add/remove a reaction (needs reactions:write)
 slack file     <file-id> [-o <path>]          # download a file by id (default: ./<name>; -o - for stdout)
+slack upload   <channel> <path…> [-t txt] [--text-file P] [--title T] [--thread-ts TS] [--raw]
+#   attach one or more local files to a single message (needs files:write).
+#   Several paths land as one message, not one message each. The initial comment
+#   goes through the same Markdown→mrkdwn conversion and @handle resolution as
+#   `send`. --title is single-file only. A U… resolves to an existing DM only —
+#   pass the D… (or message them first) if you have never DMed them.
 slack raw      <method> [k=v …] [--post] [--force]   # escape hatch: any Web API method (--force: skip mrkdwn guardrail)
 slack style    scrape|stats|exemplars                # build the personal voice corpus (see `slack-style` skill)
 slack <cmd> --json                            # raw API JSON instead of formatted output
@@ -210,7 +216,7 @@ Slack search syntax mirrors the search bar: `from:@user`, `in:#channel`, `before
 
 ## Escape hatch
 
-For Web API methods the CLI doesn't wrap natively (canvases, admin scopes, file uploads, etc.), use:
+For Web API methods the CLI doesn't wrap natively (canvases, admin scopes, etc.), use:
 
 ```bash
 slack raw <method> key=val key=val            # GET-style query params

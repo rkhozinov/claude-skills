@@ -6,7 +6,7 @@
 """Thin Slack Web API CLI using xoxp from macOS Keychain.
 
 Subcommands: mentions, dms, history, thread, reply, send, search, channels,
-users, react, file, raw, whoami.
+users, react, file, upload, raw, whoami.
 
 Reads render as clean, resolved, low-noise text by default (names, @-mentions,
 local timestamps, reaction/file/thread summaries). Pass --json for raw API
@@ -971,6 +971,83 @@ def cmd_file(args: argparse.Namespace) -> None:
     print(f"wrote {path} ({n} bytes)", file=sys.stderr)
 
 
+# --- subcommand: upload --------------------------------------------------
+
+def cmd_upload(args: argparse.Namespace) -> None:
+    """Attach one or more local files to a message.
+
+    Three-step external-upload flow: reserve a URL per file, POST the bytes to
+    it, then complete them all in one call so several attachments land on a
+    single message rather than one message each.
+
+    The initial comment goes through the same Markdown->mrkdwn conversion and
+    @handle resolution as `send`, so attachments don't become the one path that
+    silently posts literal `**bold**`.
+    """
+    channel = resolve_channel(args.channel)
+    # chat.postMessage accepts a U… and opens the IM for you, so `send U… …`
+    # works and the docs say so. files.completeUploadExternal does not -- it
+    # answers invalid_arguments. Look the IM up so `upload` honours the same
+    # contract instead of being the one subcommand that demands a D….
+    #
+    # conversations.open would be the direct route but needs im:write, which the
+    # app does not have; users.conversations is already granted. Ceiling: this
+    # only finds an IM that already exists. Send the person anything first --
+    # or pass the D… -- if you hit the error below.
+    if channel.startswith("U"):
+        ims = call("users.conversations",
+                   params={"types": "im", "limit": 200, "exclude_archived": "true"})["channels"]
+        match = next((c["id"] for c in ims if c.get("user") == channel), None)
+        if not match:
+            raise SystemExit(f"no existing DM with {channel}; send them a message first, "
+                             f"or pass the D… channel id directly")
+        channel = match
+
+    text = resolve_text(args, required=False)
+    if text:
+        text = resolve_outbound_mentions(text)
+        if getattr(args, "raw", False):
+            md = looks_like_markdown(text)
+            if md:
+                print(f"warning: --raw sends verbatim; comment contains Markdown "
+                      f"({', '.join(md)}) that Slack will render literally. "
+                      f"Drop --raw to auto-convert.", file=sys.stderr)
+        else:
+            text = markdown_to_mrkdwn(text)
+
+    if args.title and len(args.paths) > 1:
+        raise SystemExit("--title applies to a single file; omit it when uploading several "
+                         "(each defaults to its own filename)")
+
+    uploaded = []
+    for path in args.paths:
+        if not os.path.isfile(path):
+            raise SystemExit(f"not a file: {path}")
+        with open(path, "rb") as fh:
+            body = fh.read()
+        name = os.path.basename(path)
+        if not body:
+            raise SystemExit(f"refusing to upload an empty file: {path}")
+        got = call("files.getUploadURLExternal", params={"filename": name, "length": len(body)})
+        r = session().post(got["upload_url"], data=body)
+        r.raise_for_status()
+        uploaded.append({"id": got["file_id"], "title": args.title or name})
+        print(f"uploaded {name} ({len(body)} bytes)", file=sys.stderr)
+
+    payload: dict[str, Any] = {"files": uploaded, "channel_id": channel}
+    if text:
+        payload["initial_comment"] = text
+    if getattr(args, "thread_ts", None):
+        payload["thread_ts"] = args.thread_ts
+    data = call("files.completeUploadExternal", json_body=payload)
+
+    if args.json:
+        print(json.dumps(data, indent=2))
+    else:
+        names = ", ".join(f.get("name", "?") for f in data.get("files", []))
+        print(f"posted {len(uploaded)} file(s) to {channel}: {names}")
+
+
 # --- subcommand: whoami --------------------------------------------------
 
 def cmd_whoami(args: argparse.Namespace) -> None:
@@ -1313,6 +1390,18 @@ def main() -> None:
     pf.add_argument("file_id")
     pf.add_argument("-o", help="output path or '-' for stdout (default: file's name in cwd)")
     pf.set_defaults(func=cmd_file)
+
+    pup = sub.add_parser("upload", parents=[common], help="attach local file(s) to a message")
+    pup.add_argument("channel")
+    pup.add_argument("paths", nargs="+", help="one or more local file paths")
+    pup.add_argument("-t", "--text", help="initial comment; prefer --text-file for multi-line bodies")
+    pup.add_argument("--text-file", metavar="PATH",
+                     help="read the initial comment from a file (or '-' for stdin)")
+    pup.add_argument("--title", help="file title (single file only; defaults to the filename)")
+    pup.add_argument("--thread-ts", help="attach inside a thread instead of top-level")
+    pup.add_argument("--raw", action="store_true",
+                     help="send the comment verbatim (skip Markdown→mrkdwn conversion)")
+    pup.set_defaults(func=cmd_upload)
 
     pw = sub.add_parser("whoami", parents=[common], help="auth.test result")
     pw.set_defaults(func=cmd_whoami)
