@@ -67,7 +67,7 @@ def session() -> requests.Session:
     return _session
 
 
-def call(method: str, *, params: dict | None = None, json_body: dict | None = None) -> dict:
+def _request(method: str, *, params: dict | None = None, json_body: dict | None = None) -> dict:
     url = f"{API}/{method}"
     for attempt in range(5):
         if json_body is not None:
@@ -81,10 +81,25 @@ def call(method: str, *, params: dict | None = None, json_body: dict | None = No
         print(f"rate limited on {method}, sleeping {wait}s", file=sys.stderr)
         time.sleep(wait)
     r.raise_for_status()
-    data = r.json()
+    return r.json()
+
+
+def call(method: str, *, params: dict | None = None, json_body: dict | None = None) -> dict:
+    data = _request(method, params=params, json_body=json_body)
     if not data.get("ok"):
         raise SystemExit(f"slack api error: {method}: {data.get('error')} (warn={data.get('warning')})")
     return data
+
+
+def try_call(method: str, *, params: dict | None = None, json_body: dict | None = None) -> tuple[bool, dict]:
+    """Like call(), but returns (ok, data) instead of exiting on a Slack-level error.
+
+    For callers that want to branch on a specific `error` -- or, as in cmd_dms,
+    skip a single unusable item rather than abort the whole listing. Transport
+    errors and rate limiting are handled identically to call().
+    """
+    data = _request(method, params=params, json_body=json_body)
+    return bool(data.get("ok")), data
 
 
 def auth_info() -> dict:
@@ -517,7 +532,14 @@ def cmd_dms(args: argparse.Namespace) -> None:
 
     rows_raw: list[dict[str, Any]] = []
     for c in chans:
-        h = call("conversations.history", params={"channel": c["id"], "limit": 1})
+        # Slack lists the Slackbot DM in users.conversations but rejects it from
+        # every Conversations read method with channel_not_found; a deactivated
+        # peer or a revoked shared-channel grant does the same. call() would exit
+        # here, so one unreadable DM took out the entire listing before it
+        # printed a single row. A DM that cannot be read has no row to print.
+        ok, h = try_call("conversations.history", params={"channel": c["id"], "limit": 1})
+        if not ok:
+            continue
         msgs = h.get("messages") or []
         if not msgs:
             continue
