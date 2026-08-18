@@ -1,6 +1,6 @@
 ---
 name: ponytail
-description: Forces the laziest solution that actually works: YAGNI, stdlib before dependencies, one line before fifty. Use when asked for the minimal or simplest approach, or when complaining about over-engineering.
+description: "Forces the laziest solution that actually works: YAGNI, stdlib before dependencies, one line before fifty. Use when asked for the minimal or simplest approach, or when complaining about over-engineering."
 license: MIT
 ---
 
