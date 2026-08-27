@@ -133,6 +133,10 @@ Find a handle with `slack users <name>`. The cache is warmed by `slack channels`
 > **AUTHORING RULE (agent MUST follow):** before any `send`/`reply`, read
 > `~/.claude/slack-voice/voice.md` and write the message in that voice. If the file
 > is missing, say so once (`run /slack-style to build it`) and keep the message short anyway.
+>
+> **The register is ASD-STE100, not the one recorded in `voice.md`.** Read the next
+> section before drafting. It names exactly which parts of `voice.md` it supersedes and
+> which parts still bind.
 
 - **Default length is 1–3 lines.** The people receiving these messages are busy and did not
   ask for a report. A wall of agent prose makes them do the work you skipped — read
@@ -142,6 +146,69 @@ Find a handle with `slack users <name>`. The cache is warmed by `slack channels`
 - **Never claim more than was verified.** Short does not mean confident; if something is
   unchecked, one clause says so.
 - Build or refresh the profile with the `slack-style` skill (`slack style scrape|stats|exemplars`).
+
+### Register: ASD-STE100 Simplified Technical English
+
+> **REGISTER RULE (agent MUST follow):** write every message in Simplified Technical
+> English. This **supersedes the Register and Exemplars sections of `voice.md`**, which
+> record a lowercase, contraction-heavy register that is no longer the output target.
+
+`voice.md` still binds on everything else. Those parts do not conflict with STE:
+
+| `voice.md` section | status |
+|---|---|
+| Length (1–3 lines, ~200 char ceiling) | **binds.** It is stricter than the STE sentence caps. Take the stricter one. |
+| Escape hatch (verdict here, detail in a thread, say what you left out) | **binds** |
+| Anti-patterns (em dashes, bullet walls, `*Bold lead-in.*`, closing reassurance, restating the question, unprompted jargon) | **binds.** STE agrees with every one of them. |
+| Never point at a path on your own machine | **binds** |
+| Register (lowercase starts, `lemme`, `gonna`, `pls`, run-on commas) | **superseded** |
+| Exemplars (the message bank) | **superseded.** Copy their length and their structure. Do not copy their wording. |
+
+The rules, applied to a Slack message:
+
+- **Sentence case.** Start each sentence with a capital letter. End it with a period.
+- **No contractions.** Write `cannot`, not `can't`. Never `lemme`, `gonna`, `pls`, `kinda`, `nah`, `yep`, `kk`.
+- **Keep the subject, the verb, and the articles.** Write `I will check the pull request.` Do not write `checking the PR`.
+- **One instruction per sentence.** Do not join two instructions with `and` or `then`.
+- **Maximum 20 words in an instruction, 25 in a description.** The 1–3 line ceiling is stricter and still applies.
+- **Active voice. Name the actor.** Write `The migration dropped the column.` Do not write `The column was dropped.`
+- **Simple tenses only.** Write `I fixed it.` Do not write `I have fixed it.` Do not use `-ing` verb forms.
+- **Approved modals are `can`, `will`, and `must`.** Banned: `should`, `would`, `may`, `might`, `could`. For `should`, write `must` if the thing is required, and delete it if the thing is optional.
+- **One word, one meaning.** Pick one of check / verify / confirm. Reuse that one word in every message.
+- **Noun clusters of three words maximum.** Break a longer stack with a preposition.
+- **Condition before command, with a comma.** Write `If the test fails, read the log.`
+- **Delete words that carry no fact:** `simply`, `just`, `seamlessly`, `robust`, `powerful`, `leverage`, `in order to`.
+- **State uncertainty as its own plain sentence.** Write `The cause is not confirmed.` Never write `it might have been caused by`.
+- **Warnings put the command first and the risk second.** Write `Do not deploy this yet. The migration is not applied.`
+- **American spelling.**
+
+**Where STE pushes against the length ceiling.** One instruction per sentence produces
+more sentences. Write those sentences as continuous prose. A Slack reply is a message,
+not a form with fields, so nothing in it is prefixed with a heading word. If the message
+needs headings to stay readable, it is too long. Cut it to the verdict and one next step.
+Move the detail to a thread reply. The ~200 character ceiling outranks the urge to
+enumerate.
+
+STE is silent on these, so they are unchanged:
+
+- **Emoji.** Keep the `:smile:` softener at roughly the measured rate.
+- **Raw links.** Paste the URL. Do not write `[label](url)`.
+- **Mentions.** The authoring rule above still applies without change.
+- **Code blocks and pasted logs.** They are not prose. Never rewrite them.
+
+Worked rewrites, on the shapes that occur most:
+
+Examples below are invented, not quoted from any corpus. See "Privacy" in the
+`slack-style` skill: real messages never enter this repo.
+
+| intent | old register | STE |
+|---|---|---|
+| ack | `kk. lemme grab that` | `Understood. I will start this now.` |
+| status | `its up but still flaky` | `The service is deployed. It is still unstable.` |
+| ask | `can u paste the stack trace pls` | `Please paste the stack trace.` |
+| uncertainty | `hm thats odd. lemme poke at it` | `The result is unexpected. The cause is not confirmed. I will investigate.` |
+| pushing back | `nah lets not, too much surface :smile:` | `No. That change adds too much risk. :smile:` |
+| being wrong | `scratch that, wrong branch` | `I was wrong. I read the wrong branch. The correct value is 3.` |
 
 ### Sending text: prefer `--text-file`
 

@@ -50,9 +50,16 @@ them when writing the exemplar section; do not just take the top N.
 Read `slack style exemplars -n 200` output and `stats.md`, then write
 `~/.claude/slack-voice/voice.md` with these sections:
 
-1. **Register** — what the user's real messages do: capitalization, contractions,
-   recurring openers and closers, emoji habits, how they address people, how they
-   say "I'm on it" / "that's done" / "I was wrong". Quote the actual words.
+1. **Register** — **the output register is ASD-STE100 Simplified Technical English,
+   not the register the corpus measures.** Sentence case, no contractions, keep every
+   article, one instruction per sentence, simple tenses, active voice, and only the
+   modals `can` / `will` / `must`. Write that rule set into the profile first. Then
+   still record what the real messages do — capitalization, contractions, recurring
+   openers and closers, emoji habits, how they address people, how they say "I'm on
+   it" / "that's done" / "I was wrong" — but record it under a heading that marks it
+   **superseded evidence**. The corpus remains the source of length, structure and
+   anti-patterns. It is no longer the source of wording. Full rule set:
+   `slack-cli/SKILL.md` → "Register: ASD-STE100 Simplified Technical English".
 2. **Length** — the measured median and p90 from `stats.md`, stated as the target.
 3. **Escape hatch** — what to do when detail is genuinely needed: verdict in the
    message, detail in a thread reply or behind a link, and say what was left out.
@@ -63,10 +70,12 @@ Read `slack style exemplars -n 200` output and `stats.md`, then write
 4. **Anti-patterns** — drawn from the `app` bucket, which is a ready-made list of
    tells: em dashes, `*Bold lead-in.*` openers, bullet walls, stacked "two things"
    structure, unprompted jargon.
-5. **Exemplars** — 15–25 verbatim messages grouped by intent (ack, on-it, status,
+5. **Exemplars** — 15–25 real messages grouped by intent (ack, on-it, status,
    unblock-confirm, ask, correction, defer, escalate), each with the message it
-   was answering. This section does the real work; rules alone do not reproduce a
-   voice.
+   was answering. Give every one a **paired STE rewrite**, and label the original
+   `superseded — copy the length and the structure, not the wording`. The rewrites are
+   what the agent imitates. This section does the real work; rules alone do not
+   reproduce a register, but a bank of worked rewrites does.
 
 Re-run the whole thing when the profile drifts or after a few months of new history.
 
