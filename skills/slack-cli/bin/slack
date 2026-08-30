@@ -720,18 +720,48 @@ def markdown_to_mrkdwn(text: str) -> str:
 
 # Special broadcast mentions: @here/@channel/@everyone -> <!here> etc.
 _BROADCAST = {"here": "<!here>", "channel": "<!channel>", "everyone": "<!everyone>"}
-# Match @handle or @"Full Name" only when @ starts a word (not mid-email like a@b.com).
-_OUT_MENTION = re.compile(r'(?<![\w@./])@(?:"([^"\n]+)"|([A-Za-z0-9][A-Za-z0-9._-]*))')
+# One name word: handle chars only (no spaces) — "mohamed.esam", "mtork".
+_OUT_TOKEN = r"[A-Za-z0-9][A-Za-z0-9._-]*"
+_OUT_TOKRE = re.compile(_OUT_TOKEN)
+# Match @"Full Name" or @[1-5 whitespace-separated name words] only when @ starts a
+# word (not mid-email like a@b.com). The multi-word capture exists because real
+# names ARE multi-word: with a single-token regex, `@Mohamed Esam` resolved as the
+# bare first name and pinged whoever owned the shortest name in the workspace.
+_OUT_MENTION = re.compile(
+    r'(?<![\w@./])@(?:"([^"\n]+)"|('
+    + _OUT_TOKEN + r'(?:[ \t]+' + _OUT_TOKEN + r'){0,4}))')
+
+
+# First words that start a LONGER name in the map ("mohamed" when "mohamed esam"
+# also exists). A bare `@<word>` whose word sits here can ping a RANDOM shorter
+# name even though the exact word indexes a user — the map is setdefault-built,
+# so who owns a bare token is cache-load-order luck. Such tokens refuse to ping.
+_FIRSTNAME_COLLISIONS: set[str] = set()
+
+
+def _rebuild_name_prefixes() -> None:
+    """Recompute _FIRSTNAME_COLLISIONS from the current user map. Cheap (~hundreds)."""
+    _FIRSTNAME_COLLISIONS.clear()
+    for name in USER_BY_NAME:
+        parts = name.split()
+        if len(parts) > 1:
+            _FIRSTNAME_COLLISIONS.add(parts[0])
 
 
 def resolve_outbound_mentions(text: str) -> str:
-    """`@handle` / `@"Full Name"` -> `<@Uid>` so the mention actually pings.
+    """`@handle` / `@"Full Name"` / `@First Last` -> `<@Uid>` so the ping lands.
 
     EXACT match only (handle or full real-name, case-insensitive) against the
-    user cache — `@here/@channel/@everyone` become broadcast entities. An
-    ambiguous or unknown token (e.g. `@Taylor` when 7 people match) is left as
-    literal text with a stderr warning: a non-ping is better than a mis-ping.
-    Code spans/fences are protected so `@x` inside them never resolves.
+    user map — but on the LONGEST word-sequence the text offers: `@Mohamed Esam`
+    tries "mohamed esam" before "mohamed", so a full name resolves as ONE
+    mention instead of a bare first name plus dangling surname text.
+
+    A single-word match is refused when other users' names START with that word
+    (the workspace has 11 Mohameds; "mohamed" indexes one at random). It is left
+    as literal text with a stderr warning: a non-ping beats a mis-ping.
+    `@"Full Name"` (@-quoted) always means one exact full name. `@here/@channel/
+    @everyone` become broadcast entities. Code spans/fences are protected so
+    `@x` inside them never resolves.
     """
     if not text or not RESOLVE:
         return text
@@ -744,14 +774,36 @@ def resolve_outbound_mentions(text: str) -> str:
     tmp = re.sub(r"```.*?```", stash, text, flags=re.DOTALL)  # fenced code
     tmp = re.sub(r"`[^`\n]+`", stash, tmp)                    # inline code
     ensure_users_loaded()
+    _rebuild_name_prefixes()
 
     def repl(m: re.Match[str]) -> str:
-        name = m.group(1) or m.group(2)
-        if name.lower() in _BROADCAST:
-            return _BROADCAST[name.lower()]
-        uid = USER_BY_NAME.get(name.lower())
-        if uid:
-            return f"<@{uid}>"
+        quoted, chain = m.group(1), m.group(2)
+        if quoted is not None:
+            name = quoted.strip()
+            uid = USER_BY_NAME.get(name.lower())
+            if uid:
+                return f"<@{uid}>"
+            print(f"warning: @{name} did not resolve to a unique user — left as text, "
+                  f"no ping. Use the exact handle (`slack users {name}`) or <@ID>.",
+                  file=sys.stderr)
+            return m.group(0)
+        toks = list(_OUT_TOKRE.finditer(chain))
+        if not toks:
+            return m.group(0)
+        for k in range(min(5, len(toks)), 0, -1):   # longest full-name match first
+            phrase = " ".join(t.group(0) for t in toks[:k]).lower()
+            if k == 1 and phrase in _BROADCAST:
+                return _BROADCAST[phrase] + chain[toks[0].end():]
+            uid = USER_BY_NAME.get(phrase)
+            if not uid:
+                continue
+            if k == 1 and phrase in _FIRSTNAME_COLLISIONS:
+                print(f"warning: @{phrase} is ambiguous — other users' names start "
+                      f"with it. Use @\"Full Name\", the exact handle, or <@ID>. "
+                      f"Left as text, no ping.", file=sys.stderr)
+                return m.group(0)
+            return f"<@{uid}>" + chain[toks[k - 1].end():]
+        name = toks[0].group(0)
         print(f"warning: @{name} did not resolve to a unique user — left as text, "
               f"no ping. Use the exact handle (`slack users {name}`) or <@ID>.",
               file=sys.stderr)
