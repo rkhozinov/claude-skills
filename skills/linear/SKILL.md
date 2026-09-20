@@ -35,6 +35,9 @@ Set in your shell rc so you stop typing `--team "<team>"` on every command. CLI 
 | Assign | `linear-cli i assign <prefix>-123 me` |
 | Whoami | `linear-cli whoami` |
 | Labels (preview before use) | `linear-cli labels list --team "<team>"` |
+| Epic children | `linear-cli i get <prefix>-100 --output json \| jq '.[0].children'` |
+| Attach to epic | `linear-cli i update <prefix>-123 --parent <prefix>-100` |
+| Create under epic | `linear-cli i create "Title" --team "<team>" --parent <prefix>-100` |
 
 ## Create — flags
 
@@ -50,13 +53,25 @@ Set in your shell rc so you stop typing `--team "<team>"` on every command. CLI 
 | `--labels` | `-l` | Repeat for multiple |
 | `--due` | | `today`, `tomorrow`, `+3d`, `+1w`, `YYYY-MM-DD` |
 | `--estimate` | `-e` | Points |
+| `--parent` | | Parent issue (epic) identifier or UUID |
 | `--dry-run` | | Show payload without creating |
 
 ## Update
 
 `linear-cli issues update [OPTIONS] <ID>` (ID positional). Title flag is `-T` (capital), not `--title`.
 
-If `--state "Name"` fails validation: use `--data '{"stateId": "UUID"}'` with the workflow state UUID. Project: `--project "Name"` or `--project none` to clear.
+If `--state "Name"` fails validation: use `--data '{"stateId": "UUID"}'` with the workflow state UUID. Project: `--project "Name"` or `--project none` to clear. Parent (epic): `--parent <prefix>-100` or `--parent none` to detach.
+
+## Epics / sub-issues
+
+Linear has no "epic" type; an epic is a parent issue, children link via `parentId`.
+`get` returns `parent {id, identifier, title}` on every issue and `children [{identifier, title, state}]`
+(first 100). `list` returns `parent` only. Verify an attach with
+`i get <child> --fields "identifier,parent.identifier"`.
+
+History: before 2026-09-20 the CLI accepted `--data '{"parentId": ...}'` but never
+queried `parent`/`children`, so a successful attach read back as `null` and could not
+be verified from the CLI.
 
 ## Output
 
@@ -65,7 +80,7 @@ Default human table. Override:
 ```bash
 --output json       # structured JSON
 --output ndjson     # one object per line
---fields "identifier,title,state.name"
+--fields "identifier,title,state.name"   # table honours the projection (nested keys ok)
 --format '{{identifier}} {{title}}'
 --id-only           # just identifiers, scripting-friendly
 ```

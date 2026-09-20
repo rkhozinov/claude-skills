@@ -244,6 +244,17 @@ def _resolve_project(name_or_id: str) -> str:
     raise click.ClickException(f"project not found: {name_or_id}")
 
 
+def _resolve_issue_id(ident: str) -> str:
+    """Accept an issue identifier (ABC-123) or a UUID; return the UUID.
+    Used for --parent, which the API only takes as parentId."""
+    if re.fullmatch(r"[0-9a-f-]{36}", ident.lower()):
+        return ident
+    d = gql("query($id: String!) { issue(id: $id) { id } }", {"id": ident})
+    if not d.get("issue"):
+        raise click.ClickException(f"issue not found: {ident}")
+    return d["issue"]["id"]
+
+
 def _resolve_due(s: str | None) -> str | None:
     if s is None:
         return None
@@ -274,6 +285,7 @@ ISSUE_FIELDS = """
   assignee { id name email }
   team { id key name }
   project { id name }
+  parent { id identifier title }
   labels(first: 20) { nodes { id name } }
   createdAt updatedAt
 """
@@ -349,6 +361,9 @@ def _emit(items: list[dict] | dict, fmt: str, fields: str | None, template: str 
         return
     if fields:
         items = _pick_fields(items, fields)
+        if fmt == "table":
+            _table(items, cols=[k.strip() for k in fields.split(",") if k.strip()])
+            return
     if fmt == "json":
         click.echo(json.dumps(items, indent=2, default=str))
     elif fmt == "ndjson":
@@ -358,11 +373,11 @@ def _emit(items: list[dict] | dict, fmt: str, fields: str | None, template: str 
         _table(items)
 
 
-def _table(items: list[dict]) -> None:
+def _table(items: list[dict], cols: list[str] | None = None) -> None:
     if not items:
         click.echo("(no results)")
         return
-    cols = ["identifier", "title", "state", "assignee", "priority"]
+    cols = cols or ["identifier", "title", "state", "assignee", "priority"]
 
     def cell(it: dict, c: str) -> str:
         if c == "state": return (it.get("state") or {}).get("name", "")
@@ -373,7 +388,7 @@ def _table(items: list[dict]) -> None:
         v = it.get(c, "")
         return "" if v is None else str(v)
 
-    if items and "identifier" not in items[0]:
+    if items and "identifier" not in items[0] and cols == ["identifier", "title", "state", "assignee", "priority"]:
         # Generic projection: dump JSON-ish
         click.echo(json.dumps(items, indent=2, default=str))
         return
@@ -507,6 +522,11 @@ def _paginate_issues(filt: dict, limit: int, all_pages: bool) -> list[dict]:
 
 def _flatten_issue(i: dict) -> dict:
     i["labels"] = [l["name"] for l in (i.get("labels", {}) or {}).get("nodes", [])]
+    if isinstance(i.get("children"), dict):
+        i["children"] = [
+            {"identifier": c["identifier"], "title": c["title"], "state": (c.get("state") or {}).get("name")}
+            for c in i["children"].get("nodes", [])
+        ]
     return i
 
 
@@ -524,6 +544,9 @@ def issues_get(ids, incl_comments, incl_history,
             extra += " comments(first: 50) { nodes { id body createdAt user { name } } }"
         if incl_history:
             extra += " history(first: 50) { nodes { id createdAt actor { name } fromState { name } toState { name } fromAssignee { name } toAssignee { name } } }"
+        # children always fetched on get: an epic's sub-issue list is the
+        # whole point of `get` on a parent, and it was silently absent before.
+        extra += " children(first: 100) { nodes { id identifier title state { name } } }"
         d = gql(
             f"""
             query($id: String!) {{
@@ -556,11 +579,12 @@ def issues_get(ids, incl_comments, incl_history,
 @click.option("--due")
 @click.option("--estimate", "-e", type=int)
 @click.option("--project")
+@click.option("--parent", help="Parent issue (epic) identifier or UUID")
 @click.option("--data", "data_json")
 @click.option("--dry-run", is_flag=True)
 @shared_output
 def issues_create(title, team, description, priority, state, assignee, labels, due, estimate, project,
-                  data_json, dry_run, out_fmt, filters, fields, tmpl, limit, all_pages, quiet, id_only, no_pager):
+                  parent, data_json, dry_run, out_fmt, filters, fields, tmpl, limit, all_pages, quiet, id_only, no_pager):
     team = team or os.environ.get("LINEAR_DEFAULT_TEAM")
     if not team:
         raise click.ClickException("--team required (or set LINEAR_DEFAULT_TEAM)")
@@ -577,6 +601,7 @@ def issues_create(title, team, description, priority, state, assignee, labels, d
     if labels: body["labelIds"] = _resolve_labels(t, list(labels))
     if due: body["dueDate"] = _resolve_due(due)
     if estimate is not None: body["estimate"] = estimate
+    if parent: body["parentId"] = _resolve_issue_id(parent)
     body = _merge_data(body, data_json)
     if dry_run:
         click.echo(json.dumps(body, indent=2))
@@ -608,11 +633,12 @@ def issues_create(title, team, description, priority, state, assignee, labels, d
 @click.option("--due")
 @click.option("--estimate", "-e", type=int)
 @click.option("--project")
+@click.option("--parent", help="Parent issue identifier/UUID, or 'none' to detach")
 @click.option("--data", "data_json")
 @click.option("--dry-run", is_flag=True)
 @shared_output
 def issues_update(ident, title, description, priority, state, assignee, labels, due, estimate, project,
-                  data_json, dry_run, out_fmt, filters, fields, tmpl, limit, all_pages, quiet, id_only, no_pager):
+                  parent, data_json, dry_run, out_fmt, filters, fields, tmpl, limit, all_pages, quiet, id_only, no_pager):
     cur = gql(
         "query($id: String!) { issue(id: $id) { id team { id key } " + ISSUE_FIELDS + " } }",
         {"id": ident},
@@ -633,6 +659,8 @@ def issues_update(ident, title, description, priority, state, assignee, labels, 
     if estimate is not None: body["estimate"] = estimate
     if project is not None:
         body["projectId"] = None if project.lower() == "none" else _resolve_project(project)
+    if parent is not None:
+        body["parentId"] = None if parent.lower() == "none" else _resolve_issue_id(parent)
     body = _merge_data(body, data_json)
     if dry_run:
         click.echo(json.dumps(body, indent=2))
